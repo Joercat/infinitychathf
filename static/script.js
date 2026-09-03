@@ -9,10 +9,29 @@
     const APP_VERSION = '2.0.0';
 
     // ============================================================
+    // Safe storage
+    // Storage access can throw in sandboxed iframes / private mode /
+    // when cookies are blocked - that must never kill the whole app.
+    // Falls back to an in-memory store for the lifetime of the tab.
+    // ============================================================
+    const memStore = new Map();
+    const store = {
+        get(k) {
+            try { return localStorage.getItem(k); } catch (e) { return memStore.has(k) ? memStore.get(k) : null; }
+        },
+        set(k, v) {
+            try { localStorage.setItem(k, v); } catch (e) { memStore.set(k, v); }
+        },
+        remove(k) {
+            try { localStorage.removeItem(k); } catch (e) { memStore.delete(k); }
+        }
+    };
+
+    // ============================================================
     // State
     // ============================================================
     const State = {
-        token: localStorage.getItem('token'),
+        token: store.get('token'),
         user: null,                       // {id, username, display_name, avatar_path}
         ws: null,
         wsState: 'disconnected',
@@ -38,18 +57,18 @@
         latestUnseen: null,
         unreadTotal: 0,
 
-        theme: localStorage.getItem('theme') || 'light',
+        theme: store.get('theme') || 'light',
         customColors: {
-            self: localStorage.getItem('custom-self') || '#2563EB',
-            other: localStorage.getItem('custom-other') || '#F3F4F6',
-            text: localStorage.getItem('custom-text') || '#111827'
+            self: store.get('custom-self') || '#2563EB',
+            other: store.get('custom-other') || '#F3F4F6',
+            text: store.get('custom-text') || '#111827'
         },
         prefs: {
-            autoScroll: localStorage.getItem('pref-autoscroll') !== 'false',
-            showScrollBtn: localStorage.getItem('pref-scrollbtn') !== 'false',
-            showLatestBar: localStorage.getItem('pref-latestbar') !== 'false',
-            sound: localStorage.getItem('pref-sound') !== 'false',
-            enterSend: localStorage.getItem('pref-entersend') !== 'false'
+            autoScroll: store.get('pref-autoscroll') !== 'false',
+            showScrollBtn: store.get('pref-scrollbtn') !== 'false',
+            showLatestBar: store.get('pref-latestbar') !== 'false',
+            sound: store.get('pref-sound') !== 'false',
+            enterSend: store.get('pref-entersend') !== 'false'
         }
     };
 
@@ -311,7 +330,7 @@
     function applyTheme(theme) {
         document.documentElement.setAttribute('data-theme', theme);
         State.theme = theme;
-        localStorage.setItem('theme', theme);
+        store.set('theme', theme);
         if (theme === 'custom') {
             const s = State.customColors.self, o = State.customColors.other, t = State.customColors.text;
             document.documentElement.style.setProperty('--bubble-self', s);
@@ -342,11 +361,11 @@
     }
 
     function savePrefs() {
-        localStorage.setItem('pref-autoscroll', State.prefs.autoScroll);
-        localStorage.setItem('pref-scrollbtn', State.prefs.showScrollBtn);
-        localStorage.setItem('pref-latestbar', State.prefs.showLatestBar);
-        localStorage.setItem('pref-sound', State.prefs.sound);
-        localStorage.setItem('pref-entersend', State.prefs.enterSend);
+        store.set('pref-autoscroll', State.prefs.autoScroll);
+        store.set('pref-scrollbtn', State.prefs.showScrollBtn);
+        store.set('pref-latestbar', State.prefs.showLatestBar);
+        store.set('pref-sound', State.prefs.sound);
+        store.set('pref-entersend', State.prefs.enterSend);
     }
 
     [['toggle-autoscroll', 'autoScroll'], ['toggle-scroll-btn', 'showScrollBtn'],
@@ -455,7 +474,7 @@
     function handleAuthSuccess(data) {
         State.token = data.token;
         State.user = data.user;
-        localStorage.setItem('token', State.token);
+        store.set('token', State.token);
         showChat();
         connectWebSocket();
     }
@@ -2364,9 +2383,9 @@
             State.customColors.self = DOM.customSelfColor.value;
             State.customColors.other = DOM.customOtherColor.value;
             State.customColors.text = DOM.customTextColor.value;
-            localStorage.setItem('custom-self', State.customColors.self);
-            localStorage.setItem('custom-other', State.customColors.other);
-            localStorage.setItem('custom-text', State.customColors.text);
+            store.set('custom-self', State.customColors.self);
+            store.set('custom-other', State.customColors.other);
+            store.set('custom-text', State.customColors.text);
         }
         applyTheme(selectedTheme);
         closeModal(DOM.settingsModal);
@@ -2455,7 +2474,7 @@
                     return;
                 }
             } catch (e) { /* fall through to auth screen */ }
-            localStorage.removeItem('token');
+            store.remove('token');
             State.token = null;
         }
         showAuth();
@@ -2488,7 +2507,7 @@
 
     function forceLogout() {
         showToast('Session expired - please sign in again', 'warning');
-        localStorage.removeItem('token');
+        store.remove('token');
         State.token = null;
         State.wsState = 'disconnected';
         if (State.ws) { try { State.ws.close(); } catch (e) { /* noop */ } }
@@ -2544,7 +2563,7 @@
         }
         if (State.ws) { try { State.ws.close(); } catch (e) { /* noop */ } }
         State.ws = null;
-        localStorage.removeItem('token');
+        store.remove('token');
         State.token = null;
         resetAllState();
         showAuth();
