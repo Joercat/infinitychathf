@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>InfinityChat</title>
+    <meta name="theme-color" content="#2563EB">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="auth-screen" class="screen active">
+        <div class="auth-bg">
+            <div class="auth-bg-circle auth-bg-circle-1"></div>
+            <div class="auth-bg-circle auth-bg-circle-2"></div>
+            <div class="auth-bg-circle auth-bg-circle-3"></div>
+        </div>
+        <div class="auth-container">
+            <div class="auth-header">
+                <div class="auth-logo"><i class="fas fa-infinity"></i></div>
+                <h1 class="auth-title">InfinityChat</h1>
+                <p class="auth-subtitle">Secure, private, real-time messaging</p>
+            </div>
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-tab="login">
+                    <i class="fas fa-sign-in-alt"></i> Sign In
+                </button>
+                <button class="auth-tab" data-tab="signup">
+                    <i class="fas fa-user-plus"></i> Create Account
+                </button>
+            </div>
+            <form id="login-form" class="auth-form active">
+                <div class="form-group">
+                    <label for="login-username"><i class="fas fa-user"></i> Username</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="login-username" class="form-input"
+                               placeholder="Enter your username" required
+                               autocomplete="username" spellcheck="false">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="login-password"><i class="fas fa-lock"></i> Password</label>
+                    <div class="input-wrapper">
+                        <input type="password" id="login-password" class="form-input"
+                               placeholder="Enter your password" required
+                               autocomplete="current-password">
+                        <button type="button" class="input-toggle" data-toggle="login-password">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">
+                    <i class="fas fa-arrow-right"></i> Sign In
+                </button>
+            </form>
+            <form id="signup-form" class="auth-form">
+                <div class="form-group">
+                    <label for="signup-username"><i class="fas fa-user"></i> Username</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="signup-username" class="form-input"
+                               placeholder="Choose a username" required
+                               minlength="3" maxlength="30"
+                               pattern="[a-zA-Z0-9_]+" autocomplete="off" spellcheck="false">
+                    </div>
+                    <small class="form-hint">3-30 characters, letters, numbers, underscores</small>
+                </div>
+                <div class="form-group">
+                    <label for="signup-display"><i class="fas fa-id-card"></i> Display Name</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="signup-display" class="form-input"
+                               placeholder="Your display name (optional)"
+                               maxlength="50" autocomplete="off">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="signup-password"><i class="fas fa-lock"></i> Password</label>
+                    <div class="input-wrapper">
+                        <input type="password" id="signup-password" class="form-input"
+                               placeholder="Create a password" required
+                               minlength="6" autocomplete="new-password">
+                        <button type="button" class="input-toggle" data-toggle="signup-password">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                    </div>
+                    <small class="form-hint">At least 6 characters</small>
+                </div>
+                <div class="password-strength">
+                    <div class="strength-bar">
+                        <div id="strength-fill" class="strength-fill"></div>
+                    </div>
+                    <span id="strength-text" class="strength-text"></span>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">
+                    <i class="fas fa-user-plus"></i> Create Account
+                </button>
+            </form>
+            <div id="auth-error" class="alert alert-error">
+                <i class="fas fa-exclamation-circle"></i>
+                <span id="auth-error-text"></span>
+            </div>
+            <div id="auth-loading" class="auth-loading hidden">
+                <div class="spinner"></div>
+                <span>Please wait...</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="chat-screen" class="screen">
+        <header class="chat-header">
+            <div class="header-section header-left">
+                <div class="header-avatar-wrap" id="header-avatar-placeholder">
+                    <i class="fas fa-user-circle"></i>
+                </div>
+                <img id="header-avatar" class="header-avatar-img hidden" alt="Avatar">
+                <div class="header-info">
+                    <h2 class="header-name" id="header-display-name">InfinityChat</h2>
+                    <span class="header-status" id="header-status">
+                        <span class="status-dot online"></span> Online
+                    </span>
+                </div>
+            </div>
+            <div class="header-section header-right">
+                <button id="online-btn" class="btn-icon" aria-label="Online users">
+                    <i class="fas fa-users"></i>
+                    <span id="online-badge" class="badge">0</span>
+                </button>
+                <button id="settings-btn" class="btn-icon" aria-label="Settings">
+                    <i class="fas fa-cog"></i>
+                </button>
+                <button id="logout-btn" class="btn-icon" aria-label="Logout">
+                    <i class="fas fa-sign-out-alt"></i>
+                </button>
+            </div>
+        </header>
+
+        <div id="connection-status" class="connection-status">
+            <i class="fas fa-wifi"></i>
+            <span id="connection-text">Connecting...</span>
+        </div>
+
+        <div id="messages-container" class="messages-container">
+            <div id="messages-scroll" class="messages-scroll">
+                <div id="load-more" class="load-more">
+                    <button id="load-older-btn" class="btn btn-ghost hidden">
+                        <i class="fas fa-chevron-up"></i> Load older messages
+                    </button>
+                </div>
+                <div id="messages-list" class="messages-list">
+                    <div id="empty-state" class="empty-state">
+                        <div class="empty-icon"><i class="fas fa-comments"></i></div>
+                        <h3>No messages yet</h3>
+                        <p>Start the conversation below</p>
+                    </div>
+                </div>
+            </div>
+<button id="scroll-bottom-btn" class="scroll-bottom-btn hidden">
+    <i class="fas fa-chevron-down"></i>
+</button>
+<div id="latest-message-bar" class="latest-message-bar hidden">
+    <div class="lmb-avatar" id="lmb-avatar"></div>
+    <span class="lmb-name" id="lmb-name"></span>
+    <span class="lmb-text" id="lmb-text"></span>
+</div>
+        </div>
+
+        <div id="typing-indicator" class="typing-indicator hidden">
+            <div class="typing-dots">
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+            </div>
+            <span id="typing-text" class="typing-text"></span>
+        </div>
+
+        <div id="reply-preview" class="reply-preview hidden">
+            <div class="reply-bar">
+                <i class="fas fa-reply reply-icon"></i>
+                <div class="reply-content">
+                    <span class="reply-label">Replying to <strong id="reply-user"></strong></span>
+                    <span id="reply-text" class="reply-text"></span>
+                </div>
+                <button id="cancel-reply" class="btn-icon btn-icon-sm">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="compose-area">
+            <div id="upload-preview" class="upload-preview hidden">
+                <div class="upload-info">
+                    <i class="fas fa-file-alt"></i>
+                    <span id="upload-filename"></span>
+                </div>
+                <button id="cancel-upload" class="btn-icon btn-icon-sm">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="compose-form" class="compose-form">
+                <div class="compose-tools">
+                    <button type="button" id="attach-btn" class="btn-icon" aria-label="Attach">
+                        <i class="fas fa-paperclip"></i>
+                    </button>
+                    <button type="button" id="emoji-btn" class="btn-icon" aria-label="Emoji">
+                        <i class="fas fa-smile"></i>
+                    </button>
+                </div>
+                <input type="file" id="file-input" multiple
+                       accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt"
+                       style="display:none">
+                <div class="input-area">
+                    <textarea id="message-input" class="message-input"
+                              placeholder="Type a message..." rows="1"
+                              maxlength="10000"></textarea>
+                </div>
+                <button type="submit" id="send-btn" class="btn btn-send" disabled>
+                    <i class="fas fa-paper-plane"></i>
+                </button>
+            </form>
+            <div id="upload-progress" class="upload-progress hidden">
+                <div class="progress-track">
+                    <div id="progress-fill" class="progress-fill" style="width:0%"></div>
+                </div>
+                <span id="progress-text" class="progress-text">0%</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="settings-modal"></div>
+        <div class="modal-container">
+            <div class="modal-header">
+                <h2><i class="fas fa-cog"></i> Settings</h2>
+                <button class="btn-icon" data-close="settings-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <section class="settings-section">
+                    <h3>Profile</h3>
+                    <div class="avatar-section">
+                        <div id="settings-avatar-preview" class="settings-avatar">
+                            <i class="fas fa-user-circle"></i>
+                        </div>
+                        <img id="settings-avatar-img" class="settings-avatar-img hidden" alt="Avatar">
+                        <button id="avatar-upload-btn" class="btn btn-secondary btn-sm">
+                            <i class="fas fa-camera"></i> Change Photo
+                        </button>
+                        <input type="file" id="avatar-input" accept="image/*" style="display:none">
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-display-name">Display Name</label>
+                        <div class="input-wrapper">
+                            <input type="text" id="settings-display-name" class="form-input" maxlength="50">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-username">
+                            Username <span class="label-hint">(cannot be changed)</span>
+                        </label>
+                        <div class="input-wrapper">
+                            <input type="text" id="settings-username" class="form-input" disabled>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="settings-section">
+                    <h3>Appearance</h3>
+                    <div class="form-group">
+                        <label>Theme</label>
+                        <div class="theme-selector">
+                            <button class="theme-option active" data-theme="light">
+                                <div class="theme-preview theme-preview-light">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-body">
+                                        <div class="theme-preview-message self"></div>
+                                        <div class="theme-preview-message other"></div>
+                                    </div>
+                                </div>
+                                <span>Light</span>
+                            </button>
+                            <button class="theme-option" data-theme="dark">
+                                <div class="theme-preview theme-preview-dark">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-body">
+                                        <div class="theme-preview-message self"></div>
+                                        <div class="theme-preview-message other"></div>
+                                    </div>
+                                </div>
+                                <span>Dark</span>
+                            </button>
+                            <button class="theme-option" data-theme="custom">
+                                <div class="theme-preview theme-preview-custom">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-body">
+                                        <div class="theme-preview-message self"></div>
+                                        <div class="theme-preview-message other"></div>
+                                    </div>
+                                </div>
+                                <span>Custom</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="custom-theme-settings" class="custom-theme-section hidden">
+                        <div class="color-picker-row">
+                            <div class="color-picker-group">
+                                <label>Your Messages</label>
+                                <div class="color-input-wrapper">
+                                    <input type="color" id="custom-self-color" value="#2563EB">
+                                    <span class="color-hex" id="self-color-hex">#2563EB</span>
+                                </div>
+                            </div>
+                            <div class="color-picker-group">
+                                <label>Their Messages</label>
+                                <div class="color-input-wrapper">
+                                    <input type="color" id="custom-other-color" value="#F3F4F6">
+                                    <span class="color-hex" id="other-color-hex">#F3F4F6</span>
+                                </div>
+                            </div>
+                            <div class="color-picker-group">
+                                <label>Text Color</label>
+                                <div class="color-input-wrapper">
+                                    <input type="color" id="custom-text-color" value="#111827">
+                                    <span class="color-hex" id="text-color-hex">#111827</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+</section>
+<section class="settings-section">
+    <h3>Behaviour</h3>
+    <div class="settings-toggle-row">
+        <div>
+            <label for="toggle-autoscroll">Auto-scroll to bottom</label>
+            <div class="toggle-hint">Automatically scroll down when new messages arrive</div>
+        </div>
+        <label class="toggle-switch">
+            <input type="checkbox" id="toggle-autoscroll">
+            <span class="toggle-slider"></span>
+        </label>
+    </div>
+    <div class="settings-toggle-row">
+        <div>
+            <label for="toggle-scroll-btn">Show scroll-to-bottom button</label>
+            <div class="toggle-hint">Show arrow button when not at bottom</div>
+        </div>
+        <label class="toggle-switch">
+            <input type="checkbox" id="toggle-scroll-btn" checked>
+            <span class="toggle-slider"></span>
+        </label>
+    </div>
+    <div class="settings-toggle-row">
+        <div>
+            <label for="toggle-latest-bar">Show latest message bar</label>
+            <div class="toggle-hint">Show new message preview when scrolled up</div>
+        </div>
+        <label class="toggle-switch">
+            <input type="checkbox" id="toggle-latest-bar" checked>
+            <span class="toggle-slider"></span>
+        </label>
+    </div>
+</section>
+<section class="settings-section">
+    <h3>About</h3>
+                    <div class="about-info">
+                        <div class="about-row">
+                            <span>Version</span>
+                            <span class="text-secondary">1.0.0</span>
+                        </div>
+                        <div class="about-row">
+                            <span>Encryption</span>
+                            <span class="text-success">
+                                <i class="fas fa-shield-alt"></i> AES-256-GCM
+                            </span>
+                        </div>
+                        <div class="about-row">
+                            <span>Storage</span>
+                            <span class="text-secondary">HF Xet Buckets</span>
+                        </div>
+                    </div>
+                </section>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" data-close="settings-modal">Cancel</button>
+                <button id="save-settings" class="btn btn-primary">
+                    <i class="fas fa-check"></i> Save Changes
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Online Modal -->
+    <div id="online-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="online-modal"></div>
+        <div class="modal-container modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-users"></i> Online Users</h2>
+                <button class="btn-icon" data-close="online-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="online-users-list" class="online-users-list"></div>
+            <div class="modal-footer">
+                <span id="online-total" class="text-secondary">0 users online</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Emoji Picker -->
+    <div id="emoji-picker" class="emoji-picker hidden">
+        <div class="emoji-header">
+            <div class="emoji-categories">
+                <button class="emoji-cat active" data-cat="smileys"><i class="fas fa-smile"></i></button>
+                <button class="emoji-cat" data-cat="people"><i class="fas fa-user"></i></button>
+                <button class="emoji-cat" data-cat="animals"><i class="fas fa-dog"></i></button>
+                <button class="emoji-cat" data-cat="food"><i class="fas fa-utensils"></i></button>
+                <button class="emoji-cat" data-cat="activities"><i class="fas fa-futbol"></i></button>
+                <button class="emoji-cat" data-cat="objects"><i class="fas fa-lightbulb"></i></button>
+                <button class="emoji-cat" data-cat="symbols"><i class="fas fa-heart"></i></button>
+                <button class="emoji-cat" data-cat="flags"><i class="fas fa-flag"></i></button>
+            </div>
+        </div>
+        <div id="emoji-grid" class="emoji-grid"></div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
