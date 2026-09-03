@@ -109,122 +109,173 @@
     </div>
 
     <div id="chat-screen" class="screen">
-        <header class="chat-header">
-            <div class="header-section header-left">
-                <div class="header-avatar-wrap" id="header-avatar-placeholder">
-                    <i class="fas fa-user-circle"></i>
-                </div>
-                <img id="header-avatar" class="header-avatar-img hidden" alt="Avatar">
-                <div class="header-info">
-                    <h2 class="header-name" id="header-display-name">InfinityChat</h2>
-                    <span class="header-status" id="header-status">
-                        <span class="status-dot online"></span> Online
-                    </span>
-                </div>
-            </div>
-            <div class="header-section header-right">
-                <button id="online-btn" class="btn-icon" aria-label="Online users">
-                    <i class="fas fa-users"></i>
-                    <span id="online-badge" class="badge">0</span>
-                </button>
-                <button id="settings-btn" class="btn-icon" aria-label="Settings">
-                    <i class="fas fa-cog"></i>
-                </button>
-                <button id="logout-btn" class="btn-icon" aria-label="Logout">
-                    <i class="fas fa-sign-out-alt"></i>
-                </button>
-            </div>
-        </header>
+        <div class="app-layout">
 
-        <div id="connection-status" class="connection-status">
-            <i class="fas fa-wifi"></i>
-            <span id="connection-text">Connecting...</span>
-        </div>
-
-        <div id="messages-container" class="messages-container">
-            <div id="messages-scroll" class="messages-scroll">
-                <div id="load-more" class="load-more">
-                    <button id="load-older-btn" class="btn btn-ghost hidden">
-                        <i class="fas fa-chevron-up"></i> Load older messages
+            <!-- ================= SIDEBAR / CONVERSATION LIST ================= -->
+            <div id="sidebar-backdrop" class="sidebar-backdrop hidden"></div>
+            <aside id="sidebar" class="sidebar">
+                <div class="sidebar-header">
+                    <div class="sidebar-brand">
+                        <div class="auth-logo sidebar-logo"><i class="fas fa-infinity"></i></div>
+                        <span class="sidebar-brand-name">InfinityChat</span>
+                    </div>
+                    <button id="sidebar-close-btn" class="btn-icon sidebar-close" aria-label="Close menu">
+                        <i class="fas fa-times"></i>
                     </button>
                 </div>
-                <div id="messages-list" class="messages-list">
-                    <div id="empty-state" class="empty-state">
-                        <div class="empty-icon"><i class="fas fa-comments"></i></div>
-                        <h3>No messages yet</h3>
-                        <p>Start the conversation below</p>
+
+                <div class="sidebar-me">
+                    <div class="me-avatar-wrap">
+                        <img id="sb-me-avatar" class="me-avatar hidden" alt="My avatar">
+                        <div id="sb-me-avatar-ph" class="me-avatar-ph"><i class="fas fa-user"></i></div>
+                    </div>
+                    <div class="me-info">
+                        <div id="sb-me-name" class="me-name">…</div>
+                        <div class="me-status"><span class="status-dot online"></span><span>Online</span></div>
+                    </div>
+                    <button id="me-settings-btn" class="btn-icon btn-icon-sm" aria-label="Settings" title="Settings">
+                        <i class="fas fa-cog"></i>
+                    </button>
+                </div>
+
+                <nav id="conv-list" class="conv-list" aria-label="Conversations"></nav>
+
+                <div class="sidebar-footer">
+                    <button id="sidebar-logout-btn" class="btn btn-ghost btn-block">
+                        <i class="fas fa-sign-out-alt"></i> Log out
+                    </button>
+                </div>
+            </aside>
+
+            <!-- ================= MAIN CHAT COLUMN ================= -->
+            <main class="chat-main">
+                <header class="chat-header">
+                    <div class="header-section header-left">
+                        <button id="sidebar-open-btn" class="btn-icon sidebar-open" aria-label="Open conversations">
+                            <i class="fas fa-bars"></i>
+                        </button>
+                        <div class="conv-avatar-wrap">
+                            <img id="conv-avatar" class="conv-avatar-img hidden" alt="Conversation avatar">
+                            <div id="conv-avatar-ph" class="conv-avatar-ph"><i class="fas fa-globe"></i></div>
+                            <span id="conv-presence-dot" class="presence-dot hidden"></span>
+                        </div>
+                        <div class="header-info">
+                            <h2 class="header-name" id="conv-title">Global Chat</h2>
+                            <span class="header-status" id="conv-subtitle"><span class="status-dot online"></span> Online</span>
+                        </div>
+                    </div>
+                    <div class="header-section header-right">
+                        <button id="online-btn" class="btn-icon" aria-label="Online users" title="Online users">
+                            <i class="fas fa-users"></i>
+                            <span id="online-badge" class="badge hidden">0</span>
+                        </button>
+                        <button id="settings-btn" class="btn-icon" aria-label="Settings" title="Settings">
+                            <i class="fas fa-cog"></i>
+                        </button>
+                        <button id="logout-btn" class="btn-icon" aria-label="Logout" title="Log out">
+                            <i class="fas fa-sign-out-alt"></i>
+                        </button>
+                    </div>
+                </header>
+
+                <div id="connection-status" class="connection-status">
+                    <i class="fas fa-wifi"></i>
+                    <span id="connection-text">Connecting...</span>
+                </div>
+
+                <div id="messages-container" class="messages-container">
+                    <div id="messages-scroll" class="messages-scroll">
+                        <div id="load-more" class="load-more">
+                            <button id="load-older-btn" class="btn btn-ghost hidden">
+                                <i class="fas fa-chevron-up"></i> Load older messages
+                            </button>
+                        </div>
+                        <div id="messages-list" class="messages-list">
+                            <div id="empty-state" class="empty-state">
+                                <div id="empty-icon" class="empty-icon"><i class="fas fa-comments"></i></div>
+                                <h3 id="empty-title">No messages yet</h3>
+                                <p id="empty-sub">Start the conversation below</p>
+                            </div>
+                        </div>
+                    </div>
+                    <button id="scroll-bottom-btn" class="scroll-bottom-btn hidden">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div id="latest-message-bar" class="latest-message-bar hidden">
+                        <div class="lmb-avatar" id="lmb-avatar"></div>
+                        <span class="lmb-name" id="lmb-name"></span>
+                        <span class="lmb-text" id="lmb-text"></span>
                     </div>
                 </div>
-            </div>
-<button id="scroll-bottom-btn" class="scroll-bottom-btn hidden">
-    <i class="fas fa-chevron-down"></i>
-</button>
-<div id="latest-message-bar" class="latest-message-bar hidden">
-    <div class="lmb-avatar" id="lmb-avatar"></div>
-    <span class="lmb-name" id="lmb-name"></span>
-    <span class="lmb-text" id="lmb-text"></span>
-</div>
-        </div>
 
-        <div id="typing-indicator" class="typing-indicator hidden">
-            <div class="typing-dots">
-                <span class="typing-dot"></span>
-                <span class="typing-dot"></span>
-                <span class="typing-dot"></span>
-            </div>
-            <span id="typing-text" class="typing-text"></span>
-        </div>
+                <div id="typing-indicator" class="typing-indicator hidden">
+                    <div class="typing-dots">
+                        <span class="typing-dot"></span>
+                        <span class="typing-dot"></span>
+                        <span class="typing-dot"></span>
+                    </div>
+                    <span id="typing-text" class="typing-text"></span>
+                </div>
 
-        <div id="reply-preview" class="reply-preview hidden">
-            <div class="reply-bar">
-                <i class="fas fa-reply reply-icon"></i>
-                <div class="reply-content">
-                    <span class="reply-label">Replying to <strong id="reply-user"></strong></span>
-                    <span id="reply-text" class="reply-text"></span>
+                <div id="reply-preview" class="reply-preview hidden">
+                    <div class="reply-bar">
+                        <i class="fas fa-reply reply-icon"></i>
+                        <div class="reply-content">
+                            <span class="reply-label">Replying to <strong id="reply-user"></strong></span>
+                            <span id="reply-text" class="reply-text"></span>
+                        </div>
+                        <button id="cancel-reply" class="btn-icon btn-icon-sm">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
                 </div>
-                <button id="cancel-reply" class="btn-icon btn-icon-sm">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-        </div>
 
-        <div class="compose-area">
-            <div id="upload-preview" class="upload-preview hidden">
-                <div class="upload-info">
-                    <i class="fas fa-file-alt"></i>
-                    <span id="upload-filename"></span>
+                <div class="compose-area">
+                    <div id="upload-preview" class="upload-preview hidden">
+                        <div class="upload-info">
+                            <i id="upload-icon" class="fas fa-file-alt"></i>
+                            <div class="upload-text">
+                                <span id="upload-filename"></span>
+                                <span id="upload-size" class="upload-size"></span>
+                            </div>
+                        </div>
+                        <button id="cancel-upload" class="btn-icon btn-icon-sm">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                    <form id="compose-form" class="compose-form">
+                        <div class="compose-tools">
+                            <button type="button" id="attach-btn" class="btn-icon" aria-label="Attach file" title="Attach file">
+                                <i class="fas fa-paperclip"></i>
+                            </button>
+                            <button type="button" id="emoji-btn" class="btn-icon" aria-label="Emoji" title="Emoji">
+                                <i class="fas fa-smile"></i>
+                            </button>
+                        </div>
+                        <input type="file" id="file-input"
+                               accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt,.zip"
+                               style="display:none">
+                        <div class="input-area">
+                            <textarea id="message-input" class="message-input"
+                                      placeholder="Type a message...  (Paste or drop images too)" rows="1"
+                                      maxlength="10000"></textarea>
+                        </div>
+                        <button type="submit" id="send-btn" class="btn btn-send" disabled>
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </form>
+                    <div id="upload-progress" class="upload-progress hidden">
+                        <div class="progress-track">
+                            <div id="progress-fill" class="progress-fill" style="width:0%"></div>
+                        </div>
+                        <span id="progress-text" class="progress-text">0%</span>
+                    </div>
                 </div>
-                <button id="cancel-upload" class="btn-icon btn-icon-sm">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-            <form id="compose-form" class="compose-form">
-                <div class="compose-tools">
-                    <button type="button" id="attach-btn" class="btn-icon" aria-label="Attach">
-                        <i class="fas fa-paperclip"></i>
-                    </button>
-                    <button type="button" id="emoji-btn" class="btn-icon" aria-label="Emoji">
-                        <i class="fas fa-smile"></i>
-                    </button>
-                </div>
-                <input type="file" id="file-input" multiple
-                       accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt"
-                       style="display:none">
-                <div class="input-area">
-                    <textarea id="message-input" class="message-input"
-                              placeholder="Type a message..." rows="1"
-                              maxlength="10000"></textarea>
-                </div>
-                <button type="submit" id="send-btn" class="btn btn-send" disabled>
-                    <i class="fas fa-paper-plane"></i>
-                </button>
-            </form>
-            <div id="upload-progress" class="upload-progress hidden">
-                <div class="progress-track">
-                    <div id="progress-fill" class="progress-fill" style="width:0%"></div>
-                </div>
-                <span id="progress-text" class="progress-text">0%</span>
-            </div>
+            </main>
+        </div>
+        <div id="drop-overlay" class="drop-overlay hidden">
+            <i class="fas fa-cloud-upload-alt"></i>
+            <span>Drop files to attach</span>
         </div>
     </div>
 
@@ -249,7 +300,7 @@
                         <button id="avatar-upload-btn" class="btn btn-secondary btn-sm">
                             <i class="fas fa-camera"></i> Change Photo
                         </button>
-                        <input type="file" id="avatar-input" accept="image/*" style="display:none">
+                        <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">
                     </div>
                     <div class="form-group">
                         <label for="settings-display-name">Display Name</label>
@@ -265,6 +316,34 @@
                             <input type="text" id="settings-username" class="form-input" disabled>
                         </div>
                     </div>
+                </section>
+
+                <section class="settings-section">
+                    <h3>Account</h3>
+                    <div class="form-group">
+                        <label for="pw-current">Current password</label>
+                        <div class="input-wrapper">
+                            <input type="password" id="pw-current" class="form-input"
+                                   autocomplete="current-password" placeholder="••••••••">
+                            <button type="button" class="input-toggle" data-toggle="pw-current">
+                                <i class="fas fa-eye"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="pw-new">New password</label>
+                        <div class="input-wrapper">
+                            <input type="password" id="pw-new" class="form-input" minlength="6"
+                                   autocomplete="new-password" placeholder="At least 6 characters">
+                            <button type="button" class="input-toggle" data-toggle="pw-new">
+                                <i class="fas fa-eye"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <button id="pw-change-btn" class="btn btn-secondary btn-sm">
+                        <i class="fas fa-key"></i> Change Password
+                    </button>
+                    <span id="pw-msg" class="form-hint"></span>
                 </section>
 
                 <section class="settings-section">
@@ -329,52 +408,87 @@
                             </div>
                         </div>
                     </div>
-</section>
-<section class="settings-section">
-    <h3>Behaviour</h3>
-    <div class="settings-toggle-row">
-        <div>
-            <label for="toggle-autoscroll">Auto-scroll to bottom</label>
-            <div class="toggle-hint">Automatically scroll down when new messages arrive</div>
-        </div>
-        <label class="toggle-switch">
-            <input type="checkbox" id="toggle-autoscroll">
-            <span class="toggle-slider"></span>
-        </label>
-    </div>
-    <div class="settings-toggle-row">
-        <div>
-            <label for="toggle-scroll-btn">Show scroll-to-bottom button</label>
-            <div class="toggle-hint">Show arrow button when not at bottom</div>
-        </div>
-        <label class="toggle-switch">
-            <input type="checkbox" id="toggle-scroll-btn" checked>
-            <span class="toggle-slider"></span>
-        </label>
-    </div>
-    <div class="settings-toggle-row">
-        <div>
-            <label for="toggle-latest-bar">Show latest message bar</label>
-            <div class="toggle-hint">Show new message preview when scrolled up</div>
-        </div>
-        <label class="toggle-switch">
-            <input type="checkbox" id="toggle-latest-bar" checked>
-            <span class="toggle-slider"></span>
-        </label>
-    </div>
-</section>
-<section class="settings-section">
-    <h3>About</h3>
+                </section>
+
+                <section class="settings-section">
+                    <h3>Behaviour</h3>
+                    <div class="settings-toggle-row">
+                        <div>
+                            <label for="toggle-autoscroll">Auto-scroll to bottom</label>
+                            <div class="toggle-hint">Automatically scroll down when new messages arrive</div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggle-autoscroll">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-toggle-row">
+                        <div>
+                            <label for="toggle-scroll-btn">Show scroll-to-bottom button</label>
+                            <div class="toggle-hint">Show arrow button when not at bottom</div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggle-scroll-btn" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-toggle-row">
+                        <div>
+                            <label for="toggle-latest-bar">Show latest message bar</label>
+                            <div class="toggle-hint">Show new message preview when scrolled up</div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggle-latest-bar" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-toggle-row">
+                        <div>
+                            <label for="toggle-sound">Notification sound</label>
+                            <div class="toggle-hint">Play a soft sound for new messages</div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggle-sound" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-toggle-row">
+                        <div>
+                            <label for="toggle-enter-send">Enter to send</label>
+                            <div class="toggle-hint">Press Enter to send, Shift+Enter for a new line</div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggle-enter-send" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-toggle-row">
+                        <div>
+                            <label>Desktop notifications</label>
+                            <div class="toggle-hint">Browser pop-ups for new messages</div>
+                        </div>
+                        <button id="notify-perm-btn" class="btn btn-secondary btn-sm">
+                            <i class="fas fa-bell"></i> Enable
+                        </button>
+                    </div>
+                </section>
+
+                <section class="settings-section">
+                    <h3>About</h3>
                     <div class="about-info">
                         <div class="about-row">
                             <span>Version</span>
-                            <span class="text-secondary">1.0.0</span>
+                            <span class="text-secondary" id="about-version">2.0.0</span>
                         </div>
                         <div class="about-row">
                             <span>Encryption</span>
                             <span class="text-success">
                                 <i class="fas fa-shield-alt"></i> AES-256-GCM
                             </span>
+                        </div>
+                        <div class="about-row">
+                            <span>Private chats</span>
+                            <span class="text-secondary">Up to 3 per person</span>
                         </div>
                         <div class="about-row">
                             <span>Storage</span>
@@ -406,6 +520,85 @@
             <div class="modal-footer">
                 <span id="online-total" class="text-secondary">0 users online</span>
             </div>
+        </div>
+    </div>
+
+    <!-- Start private chat modal -->
+    <div id="conv-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="conv-modal"></div>
+        <div class="modal-container modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-user-lock"></i> Private Chats</h2>
+                <button class="btn-icon" data-close="conv-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p class="conv-modal-desc" id="conv-modal-desc">Chat privately with <strong>…</strong></p>
+                <div id="conv-modal-list" class="conv-modal-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" data-close="conv-modal">Cancel</button>
+                <button id="new-chat-btn" class="btn btn-primary">
+                    <i class="fas fa-plus"></i> Start New Chat
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Read receipts modal -->
+    <div id="receipts-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="receipts-modal"></div>
+        <div class="modal-container modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-check-double"></i> Read Receipts</h2>
+                <button class="btn-icon" data-close="receipts-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p id="receipts-summary" class="receipts-summary"></p>
+                <div id="receipts-list" class="receipts-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation dialog (replaces blocking confirm()) -->
+    <div id="confirm-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="confirm-modal"></div>
+        <div class="modal-container modal-sm">
+            <div class="modal-header">
+                <h2 id="confirm-title"><i class="fas fa-question-circle"></i> Confirm</h2>
+                <button class="btn-icon" data-close="confirm-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-message" class="confirm-message"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" id="confirm-cancel-btn">Cancel</button>
+                <button class="btn btn-primary" id="confirm-ok-btn">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Image lightbox -->
+    <div id="lightbox-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="lightbox-modal"></div>
+        <div class="lightbox-container">
+            <div class="lightbox-header">
+                <span id="lightbox-name" class="lightbox-name"></span>
+                <div>
+                    <a id="lightbox-download" class="btn-icon lightbox-btn" target="_blank" rel="noopener" title="Open original">
+                        <i class="fas fa-external-link-alt"></i>
+                    </a>
+                    <button class="btn-icon lightbox-btn" data-close="lightbox-modal" aria-label="Close">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            </div>
+            <img id="lightbox-img" class="lightbox-img" alt="Preview">
         </div>
     </div>
 
