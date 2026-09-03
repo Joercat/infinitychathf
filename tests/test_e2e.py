@@ -113,6 +113,28 @@ async def main():
               "alice got global conversation in payload")
         check(any(u["id"] == alice.user["id"] for u in ev_b["online_users"]), "bob sees alice online")
 
+        # ---- live presence stays in sync after profile changes ----
+        r = await http.patch(f"{BASE}/api/profile?display_name=AliceX",
+                             headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200, "alice profile update ok")
+        pv = await bob.expect("profile_updated", 6)
+        check(pv["user_id"] == alice.user["id"] and pv["display_name"] == "AliceX",
+              "bob receives live profile update")
+        await bob.send({"type": "get_online_users"})
+        online = await bob.expect("online_users", 6)
+        alice_online = next((u for u in online["users"] if u["id"] == alice.user["id"]), None)
+        check(alice_online is not None and alice_online["display_name"] == "AliceX",
+              "online users list reflects updated profile")
+
+        # ---- disconnect must clear presence on other clients ----
+        await alice.drain(0.4)  # clear the earlier "bob online" event
+        await bob.ws.close()
+        off = await alice.expect("user_status", 6)
+        check(off["user_id"] == bob.user["id"] and off["status"] == "offline",
+              "alice is notified when bob disconnects")
+        # reconnect bob so the rest of the suite can keep using him
+        await bob.connect()
+
         # ---- global message + receipt round trip ----
         await alice.send({"type": "send_message", "content": "hello everyone", "conversation_id": 1, "client_id": "c1"})
         echo = await alice.expect("new_message")

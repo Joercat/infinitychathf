@@ -763,13 +763,23 @@ async def update_profile(
         raise HTTPException(401)
     db = await get_db()
     try:
+        updated_name = display_name.strip() or user['username']
         await db.execute(
             "UPDATE users SET display_name = ? WHERE id = ?",
-            (display_name.strip() or user['username'], user['id'])
+            (updated_name, user['id'])
         )
         await db.commit()
         schedule_db_sync()
-        user['display_name'] = display_name.strip() or user['username']
+        user['display_name'] = updated_name
+        # Live presence uses in-memory state; keep the online-users list fresh
+        manager.update_profile(user['id'], display_name=updated_name, avatar_path=user.get('avatar_path'))
+        await manager.broadcast({
+            "type": "profile_updated",
+            "user_id": user['id'],
+            "username": user['username'],
+            "display_name": updated_name,
+            "avatar_path": user.get('avatar_path'),
+        })
         return {"user": user}
     finally:
         await db.close()
@@ -884,6 +894,16 @@ async def upload_avatar(
         schedule_db_sync()
     finally:
         await db.close()
+
+    # Live presence uses in-memory state; keep the online-users list fresh
+    manager.update_profile(user['id'], avatar_path=remote_path)
+    await manager.broadcast({
+        "type": "profile_updated",
+        "user_id": user['id'],
+        "username": user['username'],
+        "display_name": user['display_name'],
+        "avatar_path": remote_path,
+    })
     return {"avatar_path": remote_path}
 
 
@@ -1398,6 +1418,17 @@ class ConnectionManager:
             for uid, info in self.active.items()
         ]
 
+    def update_profile(self, user_id: int, display_name: Optional[str] = None,
+                       avatar_path: Optional[str] = None):
+        """Keep the in-memory presence record in sync with profile changes."""
+        if user_id not in self.active:
+            return
+        info = self.active[user_id]
+        if display_name is not None and display_name != "":
+            info["display_name"] = display_name
+        if avatar_path is not None:
+            info["avatar_path"] = avatar_path
+
     def is_online(self, user_id: int) -> bool:
         return user_id in self.active
 
@@ -1883,12 +1914,10 @@ async def ws_endpoint(ws: WebSocket, token: str = Query(...)):
     except Exception as e:
         logger.error(f"WS error for {username}: {e}", exc_info=True)
     finally:
-        still_online = False
-        # Only mark offline if no other tabs of this user remain connected
-        if uid in manager.active and manager.active[uid]["connections"]:
-            still_online = True
+        # Remove this socket first. If the user still has another connection
+        # (multi-tab), they stay online; otherwise they are now fully offline.
         manager.disconnect(ws, uid)
-        if not still_online:
+        if uid not in manager.active:
             db = await get_db()
             try:
                 await db.execute(

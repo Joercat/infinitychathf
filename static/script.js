@@ -539,6 +539,12 @@
         }
     }, 20000);
 
+    // periodic presence refresh so a missed status event can't leave the
+    // online list/badge stale (e.g. after a background tab is throttled)
+    setInterval(() => {
+        if (wsOpen()) wsSend({ type: 'get_online_users' });
+    }, 60000);
+
     function wsOpen() {
         return State.ws && State.ws.readyState === WebSocket.OPEN;
     }
@@ -770,8 +776,8 @@
             DOM.convAvatarPh.className = 'conv-avatar-ph';
             DOM.convAvatarPh.innerHTML = '<i class="fas fa-globe"></i>';
             DOM.convPresenceDot.classList.add('hidden');
-            const meCount = State.onlineUsers.has(State.user?.id) ? State.onlineUsers.size - 1 : State.onlineUsers.size;
-            DOM.convSubtitle.innerHTML = `<span class="status-dot online"></span> ${Math.max(0, meCount)} online`;
+            const meCount = onlineCountExcludingSelf();
+            DOM.convSubtitle.innerHTML = `<span class="status-dot online"></span> ${meCount} online`;
             DOM.onlineBtn.style.display = '';
         }
     }
@@ -818,7 +824,10 @@
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             markActiveRead(true);
+            updateAllPeerPresence();
+            requestOnlineUsers();
             if (State.activeConvId) renderConversationHeader(State.activeConvId);
+            if (!DOM.onlineModal.classList.contains('hidden')) renderOnlineUsers();
         } else {
             updateTitleUnread();
         }
@@ -909,6 +918,8 @@
                 (msg.online_users || []).forEach(u => State.onlineUsers.set(u.id, u));
                 updateSidebarMe();
                 updateOnlineBadge();
+                updateAllPeerPresence();
+                if (!DOM.onlineModal.classList.contains('hidden')) renderOnlineUsers();
 
                 // fresh session: adopt server conversation list, drop old caches
                 State.conversations.clear();
@@ -1026,16 +1037,19 @@
             }
 
             case 'user_status': {
+                const updated = {
+                    id: msg.user_id, username: msg.username,
+                    display_name: msg.display_name, avatar_path: msg.avatar_path
+                };
                 if (msg.status === 'online') {
-                    State.onlineUsers.set(msg.user_id, {
-                        id: msg.user_id, username: msg.username,
-                        display_name: msg.display_name, avatar_path: msg.avatar_path
-                    });
+                    State.onlineUsers.set(msg.user_id, updated);
+                    applyUserProfileToConversations(updated);
                 } else {
                     State.onlineUsers.delete(msg.user_id);
                 }
                 updateOnlineBadge();
                 updatePeerPresence(msg.user_id, msg.status === 'online');
+                renderSidebar();
                 if (State.activeConvId) renderConversationHeader(State.activeConvId);
                 break;
             }
@@ -1045,6 +1059,28 @@
                 msg.users.forEach(u => State.onlineUsers.set(u.id, u));
                 updateOnlineBadge();
                 updateAllPeerPresence();
+                if (!DOM.onlineModal.classList.contains('hidden')) renderOnlineUsers();
+                break;
+            }
+
+            case 'profile_updated': {
+                const updated = {
+                    id: msg.user_id,
+                    username: msg.username,
+                    display_name: msg.display_name,
+                    avatar_path: msg.avatar_path,
+                };
+                if (updated.id === State.user?.id) {
+                    State.user.display_name = updated.display_name;
+                    State.user.avatar_path = updated.avatar_path;
+                    updateSidebarMe();
+                }
+                State.onlineUsers.set(updated.id, updated);
+                updateOnlineBadge();
+                applyUserProfileToConversations(updated);
+                updateAllPeerPresence();
+                renderSidebar();
+                if (State.activeConvId) renderConversationHeader(State.activeConvId);
                 if (!DOM.onlineModal.classList.contains('hidden')) renderOnlineUsers();
                 break;
             }
@@ -1126,6 +1162,17 @@
         }
         const ts = State.tombstoned.get(convId);
         if (ts) ts.delete(mid);
+    }
+
+    function applyUserProfileToConversations(user) {
+        if (!user || !user.id) return;
+        State.conversations.forEach(c => {
+            if (c.type === 'dm' && c.peer && c.peer.id === user.id) {
+                if (user.username) c.peer.username = user.username;
+                if (user.display_name) c.peer.display_name = user.display_name;
+                if ('avatar_path' in user) c.peer.avatar_path = user.avatar_path;
+            }
+        });
     }
 
     function updatePeerPresence(userId, online) {
@@ -2252,14 +2299,21 @@
         if (wsOpen()) wsSend({ type: 'get_online_users' });
     }
 
+    function onlineCountExcludingSelf() {
+        const hasSelf = State.onlineUsers.has(State.user?.id);
+        return hasSelf ? Math.max(0, State.onlineUsers.size - 1) : State.onlineUsers.size;
+    }
+
     function updateOnlineBadge() {
-        DOM.onlineBadge.textContent = State.onlineUsers.size;
-        DOM.onlineBadge.classList.toggle('hidden', State.onlineUsers.size === 0);
+        const count = onlineCountExcludingSelf();
+        DOM.onlineBadge.textContent = count;
+        DOM.onlineBadge.classList.toggle('hidden', count === 0);
     }
 
     function renderOnlineUsers() {
         DOM.onlineUsersList.innerHTML = '';
-        if (!State.onlineUsers.size) {
+        const count = onlineCountExcludingSelf();
+        if (count === 0) {
             DOM.onlineUsersList.innerHTML = '<div class="loading-state"><span>No users online</span></div>';
             DOM.onlineTotal.textContent = '0 users online';
             return;
@@ -2279,7 +2333,7 @@
                 </div>`;
             DOM.onlineUsersList.appendChild(div);
         });
-        DOM.onlineTotal.textContent = `${State.onlineUsers.size - (State.onlineUsers.has(State.user?.id) ? 1 : 0)} user${State.onlineUsers.size !== 1 ? 's' : ''} online`;
+        DOM.onlineTotal.textContent = `${count} user${count === 1 ? '' : 's'} online`;
     }
 
     // ============================================================
