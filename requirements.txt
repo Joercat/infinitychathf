@@ -1,0 +1,6 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+huggingface_hub>=0.26.0
+cryptography>=43.0.0
+aiosqlite>=0.20.0
+python-multipart>=0.0.9
