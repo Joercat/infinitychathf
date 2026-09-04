@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=3">
+    <link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body>
     <div id="auth-screen" class="screen active">
@@ -165,6 +165,9 @@
                         </div>
                     </div>
                     <div class="header-section header-right">
+                        <button id="private-chat-btn" class="btn-icon" aria-label="New private chat" title="New private chat">
+                            <i class="fas fa-user-plus"></i>
+                        </button>
                         <button id="group-btn" class="btn-icon" aria-label="New group chat" title="New group chat">
                             <i class="fas fa-people-group"></i>
                         </button>
@@ -549,6 +552,7 @@
             </div>
             <div class="modal-body">
                 <p class="conv-modal-desc" id="conv-modal-desc">Chat privately with <strong>…</strong></p>
+                <input type="search" id="conv-user-search" class="form-input hidden" placeholder="Search by name or username…" autocomplete="off">
                 <div id="conv-modal-list" class="conv-modal-list"></div>
             </div>
             <div class="modal-footer">
@@ -702,6 +706,6 @@
 
     <div id="toast-container" class="toast-container"></div>
 
-    <script src="/static/script.js?v=3"></script>
+    <script src="/static/script.js?v=4"></script>
 </body>
 </html>

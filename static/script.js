@@ -117,7 +117,7 @@
         confirmModal: $('confirm-modal'), lightboxModal: $('lightbox-modal'),
         emojiPicker: $('emoji-picker'), emojiGrid: $('emoji-grid'),
 
-        groupBtn: $('group-btn'), groupModal: $('group-modal'),
+        privateChatBtn: $('private-chat-btn'), groupBtn: $('group-btn'), groupModal: $('group-modal'),
         groupNameInput: $('group-name-input'), groupUserSearch: $('group-user-search'),
         groupUserResults: $('group-user-results'), groupSelectedList: $('group-selected-list'),
         createGroupBtn: $('create-group-btn'),
@@ -144,6 +144,7 @@
         settingsBtn: $('settings-btn'), logoutBtn: $('logout-btn'), meSettingsBtn: $('me-settings-btn'),
         sidebarLogoutBtn: $('sidebar-logout-btn'),
         convModalDesc: $('conv-modal-desc'), convModalList: $('conv-modal-list'), newChatBtn: $('new-chat-btn'),
+        convUserSearch: $('conv-user-search'),
         receiptsSummary: $('receipts-summary'), receiptsList: $('receipts-list'),
         confirmTitle: $('confirm-title'), confirmMessage: $('confirm-message'),
         confirmOkBtn: $('confirm-ok-btn'), confirmCancelBtn: $('confirm-cancel-btn'),
@@ -2186,9 +2187,69 @@
             (existing.length ? ` (${existing.length} of 3 existing)` : '');
         DOM.convModal.dataset.peerId = peerId;
         DOM.convModal.dataset.peerName = peerName;
+        DOM.convUserSearch.classList.add('hidden');
+        DOM.newChatBtn.style.display = '';
         renderConvModal(existing);
         openModal(DOM.convModal);
     }
+
+    function openPrivateChatPicker() {
+        DOM.convModal.dataset.peerId = '';
+        DOM.convModal.dataset.peerName = '';
+        DOM.convModalDesc.innerHTML = 'Start a <strong>private chat</strong> with someone';
+        DOM.convUserSearch.classList.remove('hidden');
+        DOM.convUserSearch.value = '';
+        DOM.newChatBtn.style.display = 'none';
+        DOM.convModalList.innerHTML = '<div class="conv-modal-empty">Loading users…</div>';
+        loadPrivateUsers('');
+        openModal(DOM.convModal);
+    }
+
+    function renderPrivateUsers(users) {
+        if (!users || !users.length) {
+            DOM.convModalList.innerHTML = '<div class="conv-modal-empty">No one found</div>';
+            return;
+        }
+        DOM.convModalList.innerHTML = users.filter(u => u.id !== State.user?.id).map(u => {
+            const existing = [...State.conversations.values()].filter(
+                c => c.type === 'dm' && c.peer && c.peer.id === u.id
+            );
+            const count = existing.length ? ` · ${existing.length} chat${existing.length === 1 ? '' : 's'}` : '';
+            const av = u.avatar_path
+                ? `<img src="${fileUrl(u.avatar_path)}" alt="" style="width:36px;height:36px;border-radius:50%;object-fit:cover">`
+                : `<span style="font-weight:600;font-size:1.1rem">${initialOf(displayNameOf(u))}</span>`;
+            return `<button class="conv-modal-item" data-pick-user="${u.id}">
+                <div class="user-avatar">${av}</div>
+                <div class="mi-info">
+                    <span class="mi-name">${escapeHtml(displayNameOf(u))}</span>
+                    <span class="mi-preview">${escapeHtml(u.username)}${count}${u.online ? ' · online' : ''}${u.blocked ? ' · blocked' : ''}</span>
+                </div>
+                <i class="fas fa-user-plus mi-open"></i>
+            </button>`;
+        }).join('') || '<div class="conv-modal-empty">No one found</div>';
+        DOM.convModalList.querySelectorAll('[data-pick-user]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const u = users.find(x => x.id === parseInt(btn.dataset.pickUser, 10));
+                if (!u) return;
+                if (u.blocked) { showToast('You have blocked this user', 'warning'); return; }
+                openConvModal(u.id, displayNameOf(u));
+            });
+        });
+    }
+
+    async function loadPrivateUsers(query = '') {
+        try {
+            const data = await apiGet(`/api/users?query=${encodeURIComponent(query)}`);
+            renderPrivateUsers(data.users || []);
+        } catch (err) {
+            DOM.convModalList.innerHTML = `<div class="conv-modal-empty">${escapeHtml(err.message)}</div>`;
+        }
+    }
+
+    DOM.privateChatBtn.addEventListener('click', openPrivateChatPicker);
+    DOM.convUserSearch.addEventListener('input', debounce(() => {
+        loadPrivateUsers(DOM.convUserSearch.value.trim());
+    }, 250));
 
     function renderConvModal(existing) {
         let html = '';
