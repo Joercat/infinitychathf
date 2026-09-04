@@ -208,15 +208,30 @@ async def main():
         check(alice.ws.state is WsState.OPEN, "alice socket STILL OPEN after delete (bug fixed)")
         check(bob.ws.state is WsState.OPEN, "bob socket STILL OPEN after delete (bug fixed)")
 
-        # ---- private chats: create, cap of 3, scoped delivery ----
+        # ---- private chats: create, require acceptance, cap of 3, scoped delivery ----
         await alice.send({"type": "create_dm", "user_id": bob.user["id"]})
         dm1_a = await alice.expect("dm_created")
         dm1 = dm1_a["conversation"]
         check(dm1["type"] == "dm" and dm1["peer"]["id"] == bob.user["id"], "dm created for alice")
-        dm1_b = await bob.expect("dm_created", 6)
-        check(dm1_b["conversation"]["id"] == dm1["id"] and dm1_b["conversation"]["peer"]["id"] == alice.user["id"],
-              "bob sees same dm")
+        dm1_b = await bob.expect("conversation_updated", 6)
+        check(dm1_b["conversation"]["id"] == dm1["id"] and dm1_b["conversation"]["peer"]["id"] == alice.user["id"]
+              and dm1_b["conversation"]["is_pending"],
+              "bob sees pending private chat invite")
         dmid = dm1["id"]
+
+        # A pending DM invitee cannot send or load until accepting.
+        await bob.send({"type": "send_message", "conversation_id": dmid,
+                        "content": "before accept", "client_id": "bob-pre-accept"})
+        pre_err = await bob.expect("error")
+        check(pre_err.get("code") == "FORBIDDEN", "pending invitee cannot send", pre_err.get("message", ""))
+        r = await http.post(f"{BASE}/api/conversations/{dmid}/accept", headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 200 and r.json()["conversation"]["is_pending"] is False,
+              "bob accepts private chat invite")
+        accept_a = await alice.expect("conversation_updated", 6)
+        check(accept_a["conversation"]["id"] == dmid and accept_a["conversation"]["is_pending"] is False,
+              "alice is notified bob accepted")
+        await alice.drain(0.2)
+        await bob.drain(0.2)
 
         # send dm message -> global watchers must NOT see it
         await alice.send({"type": "send_message", "conversation_id": dmid, "content": "psst secret",
@@ -237,11 +252,12 @@ async def main():
         ty = await wait_events([bob], "typing_indicator")
         check(ty["bob"] and ty["bob"][0]["conversation_id"] == dmid, "typing scoped to dm")
 
-        # two more dms, 4th must be rejected
+        # two more dms (pending for bob), 4th must be rejected
+        extra_dm_ids = []
         for i in range(2):
             await alice.send({"type": "create_dm", "user_id": bob.user["id"]})
-            await alice.expect("dm_created")
-            await bob.expect("dm_created", 6)
+            extra_dm_ids.append((await alice.expect("dm_created"))["conversation"]["id"])
+            await bob.expect("conversation_updated", 6)
         await alice.send({"type": "create_dm", "user_id": bob.user["id"]})
         err = await alice.expect("error")
         check(err["code"] == "DM_FAILED" and "3" in err["message"], "4th dm rejected (cap 3)", err["message"])
@@ -288,6 +304,28 @@ async def main():
                            headers={"X-Auth-Token": alice.token})
         rr = r.json()
         check(rr["is_dm"] and rr["reader_count"] == 1 and rr["not_read"] == [], "dm receipts exact")
+
+        # ---- DM invites can be declined and re-invites require acceptance again ----
+        reinv_id = extra_dm_ids[0]
+        r = await http.post(f"{BASE}/api/conversations/{reinv_id}/reject",
+                            headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 200 and r.json()["status"] == "rejected", "pending invitee declines dm")
+        await alice.drain(0.3)  # alice is told the invite was declined
+        await bob.drain(0.2)
+        await alice.send({"type": "create_dm", "user_id": bob.user["id"]})
+        re_created = await alice.expect("dm_created")
+        check(re_created["conversation"]["id"] == reinv_id,
+              "dm re-invite reuses the existing conversation")
+        re_pend = await bob.expect("conversation_updated", 6)
+        check(re_pend["conversation"]["id"] == reinv_id and re_pend["conversation"]["is_pending"],
+              "dm re-invite requires acceptance again")
+        r = await http.post(f"{BASE}/api/conversations/{reinv_id}/accept",
+                            headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 200 and r.json()["conversation"]["is_pending"] is False,
+              "bob accepts the dm re-invite")
+        await alice.expect("conversation_updated", 6)
+        await alice.drain(0.2)
+        await bob.drain(0.2)
 
         # ---- password change ----
         r = await http.post(f"{BASE}/api/profile/password?current_password=password123&new_password=password456",
@@ -465,6 +503,47 @@ async def main():
         after = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": alice.token})
         check(any(c["id"] == dmid for c in after.json()["conversations"]),
               "hidden dm returns after unblock")
+
+        # ---- privacy: deleting a private chat hides it for that user ----
+        await alice.drain(0.3)
+        await bob.drain(0.3)
+        r = await http.delete(f"{BASE}/api/conversations/{dmid}", headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200 and r.json()["status"] == "hidden", "alice hides dm", r.text[:160])
+        left_a = await alice.expect("conversation_left", 6)
+        check(left_a["user_id"] == alice.user["id"] and left_a["reason"] == "deleted",
+              "alice gets conversation_left for own hide")
+        left_b = await bob.expect("conversation_left", 6)
+        check(left_b["user_id"] == alice.user["id"] and left_b["reason"] == "deleted"
+              and left_b["conversation"]["id"] == dmid
+              and left_b["conversation"]["peer_removed"] is True,
+              "bob is told alice no longer wants to chat")
+        r = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": alice.token})
+        check(all(c["id"] != dmid for c in r.json()["conversations"]),
+              "hidden dm omitted from alice's list")
+        r = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": bob.token})
+        check(any(c["id"] == dmid for c in r.json()["conversations"]),
+              "hidden dm still present for bob")
+
+        # bob can still send, but the hidden user never receives it
+        await bob.send({"type": "send_message", "conversation_id": dmid,
+                        "content": "after alice hid", "client_id": "after-hide"})
+        echo = await bob.expect("new_message")
+        check(echo["message"]["content"] == "after alice hid", "bob can still send into the dm")
+        leak = await alice.drain(0.5)
+        check(not any(e.get("type") == "new_message" and e.get("message", {}).get("conversation_id") == dmid
+                      for e in leak), "hidden user does not receive dm messages")
+
+        # bob deletes too -> chat is removed for everyone
+        r = await http.delete(f"{BASE}/api/conversations/{dmid}", headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 200 and r.json()["status"] == "deleted", "bob deletes dm too", r.text[:160])
+        del_b = await bob.expect("conversation_deleted", 6)
+        del_a = await alice.expect("conversation_deleted", 6)
+        check(del_b["conversation_id"] == dmid and del_a["conversation_id"] == dmid,
+              "both users are notified when the dm is fully deleted")
+        r = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": alice.token})
+        check(all(c["id"] != dmid for c in r.json()["conversations"]), "deleted dm gone for alice")
+        r = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": bob.token})
+        check(all(c["id"] != dmid for c in r.json()["conversations"]), "deleted dm gone for bob")
 
         # ---- auth edge ----
         r = await http.get(BASE + "/api/auth/verify", headers={"X-Auth-Token": "bogus"})

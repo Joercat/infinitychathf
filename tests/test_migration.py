@@ -173,6 +173,19 @@ for need in ("idx_messages_client_dedupe", "idx_messages_conversation"):
     if need not in idx:
         failures.append(f"missing index {need}")
 
+# Pending invites must survive a restart (they are not auto-accepted by the
+# migration, which would defeat the invite requirement for DMs/groups).
+con.execute(
+    "INSERT INTO conversations (type, title, created_by, is_group) VALUES ('dm', '', 1, 1)"
+)
+gid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+con.execute(
+    "INSERT INTO conversation_members (conversation_id, user_id, joined_at, status, role) "
+    "VALUES (?, ?, strftime('%s','now'), 'pending', 'member')",
+    (gid, 2)
+)
+con.commit()
+convs_before_second = con.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
 con.close()
 
 # ------------------------------------------------------------------
@@ -184,11 +197,16 @@ n2 = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 c2 = con.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
 u2 = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 rc2 = con.execute("SELECT read_at FROM read_receipts WHERE user_id=1 AND message_id=1").fetchone()[0]
+pend = con.execute(
+    "SELECT status FROM conversation_members WHERE conversation_id=? AND user_id=2", (gid,)
+).fetchone()
 con.close()
-if n2 != n_msgs or c2 != convs or u2 != n_users:
-    failures.append(f"second run duplicated/lost data: msgs {n_msgs}->{n2}, convs {convs}->{c2}, users {n_users}->{u2}")
+if n2 != n_msgs or c2 != convs_before_second or u2 != n_users:
+    failures.append(f"second run duplicated/lost data: msgs {n_msgs}->{n2}, convs {convs_before_second}->{c2}, users {n_users}->{u2}")
 if rc2 != 1700000002000:
     failures.append(f"read_at re-multiplied on second run: {rc2}")
+if not pend or pend[0] != "pending":
+    failures.append(f"pending invite was not preserved across restart: {pend}")
 
 print("\n==== RESULT ====")
 if failures:

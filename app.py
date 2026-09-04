@@ -216,10 +216,12 @@ async def init_database():
             if col not in cm_cols:
                 await _ensure_column(db, "conversation_members", col, ddl)
 
-        # Existing memberships predate invites/roles: make them accepted.
+        # Existing memberships predate invites/roles: only null/empty get the
+        # default. A real 'pending' invite keeps its pending state across
+        # restarts so DMs/groups still require the invitee to accept.
         await db.execute(
             "UPDATE conversation_members SET status = 'accepted' "
-            "WHERE status IS NULL OR status = '' OR status = 'pending'"
+            "WHERE status IS NULL OR status = ''"
         )
         await db.execute(
             "UPDATE conversation_members SET role = 'member' "
@@ -586,12 +588,33 @@ def _preview_for(content: str, file_type: str, file_name: str) -> str:
 
 
 async def _peer_for(db: aiosqlite.Connection, cid: int, uid: int) -> Optional[dict]:
-    """The other person inside a DM conversation."""
+    """The other person inside a DM conversation.
+
+    Falls back to the conversation's pair columns so the initiator still sees
+    the intended recipient's name even after that recipient rejected or left.
+    """
     cursor = await db.execute(
         """SELECT u.id, u.username, u.display_name, u.avatar_path, u.status, u.last_seen
            FROM conversation_members cm JOIN users u ON u.id = cm.user_id
            WHERE cm.conversation_id = ? AND cm.user_id != ? LIMIT 1""",
         (cid, uid)
+    )
+    row = await cursor.fetchone()
+    if row:
+        return dict(row)
+    cursor = await db.execute(
+        "SELECT user_low_id, user_high_id FROM conversations WHERE id = ?", (cid,)
+    )
+    conv = await cursor.fetchone()
+    if not conv:
+        return None
+    other_id = conv["user_high_id"] if conv["user_low_id"] == uid else conv["user_low_id"]
+    if not other_id or other_id == uid:
+        return None
+    cursor = await db.execute(
+        """SELECT id, username, display_name, avatar_path, status, last_seen
+           FROM users WHERE id = ?""",
+        (other_id,)
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
@@ -646,6 +669,7 @@ async def _build_conversation_summary(
         "created_at": conv["created_at"],
         "peer": None,
         "peer_online": False,
+        "peer_removed": False,
         "dm_number": dm_number,
         "status": membership.get("status", "accepted"),
         "role": membership.get("role", "member"),
@@ -692,11 +716,13 @@ async def _build_conversation_summary(
                 "last_seen": peer["last_seen"],
             }
             summary["peer_online"] = peer["id"] in online_ids
+            peer_membership = await _membership(db, cid, peer["id"])
+            summary["peer_removed"] = bool(peer_membership and peer_membership.get("status") == "left")
             summary["dm_number"] = await _dm_number(db, cid)
             if not custom_name:
                 title = peer["display_name"] or peer["username"]
                 summary["title"] = title
-        # If no custom name and no peer (unlikely), keep generic title.
+    # If no custom name and no peer (unlikely), keep generic title.
 
     # Newest visible message (encrypted in DB - decrypt only what we preview)
     cursor = await db.execute(
@@ -1142,9 +1168,14 @@ _dm_create_lock = asyncio.Lock()
 
 async def _create_dm(db: aiosqlite.Connection, uid: int, target_id: int,
                      manager_ref=None) -> Optional[dict]:
-    """Create a private chat. Returns summary or None if invalid/at limit.
+    """Create (or re-invite) a private chat. Returns summary or None if invalid.
+
+    Like group invites, every newly created DM is pending until the other person
+    accepts. Re-inviting a conversation the user previously hid (or that the
+    recipient rejected/left) also requires the recipient to accept again.
 
     Up to MAX_PRIVATE_CHATS_PER_PAIR private chats are allowed per pair of users.
+    Hidden ('left') chats do not consume that slot and are restored on re-invite.
     Blocked users cannot create or be added to a private chat; the global room
     remains the only shared conversation.
     """
@@ -1163,31 +1194,80 @@ async def _create_dm(db: aiosqlite.Connection, uid: int, target_id: int,
 
         low, high = sorted([uid, target_id])
         cursor = await db.execute(
-            """SELECT COUNT(*) AS cnt FROM conversations
-               WHERE type = 'dm' AND is_group = 0 AND user_low_id = ? AND user_high_id = ?""",
+            """SELECT id FROM conversations
+               WHERE type = 'dm' AND is_group = 0 AND user_low_id = ? AND user_high_id = ?
+               ORDER BY id ASC""",
             (low, high)
         )
-        existing = (await cursor.fetchone())["cnt"]
+        dm_ids = [r["id"] for r in await cursor.fetchall()]
 
-        if existing >= MAX_PRIVATE_CHATS_PER_PAIR:
+        # An active chat is one both sides still participate in (either the
+        # recipient accepted, or is currently holding a pending invite). A chat
+        # the recipient rejected/left (or that this user hid) does not consume a
+        # slot and can be re-invited without creating an extra conversation.
+        active_count = 0
+        reusable_id = None
+        for cid in dm_ids:
+            mine = await _membership(db, cid, uid)
+            other = await _membership(db, cid, target_id)
+            status = mine.get("status") if mine else None
+            other_status = other.get("status") if other else None
+            if status in ("accepted", "pending") and other_status in ("accepted", "pending"):
+                active_count += 1
+            elif ((status == "accepted" and (other is None or other_status == "left"))
+                  or (status == "left" and other is not None)) and reusable_id is None:
+                # Restore the oldest inactive chat. The recipient must accept
+                # again (set to pending below) before the chat is usable.
+                reusable_id = cid
+
+        if active_count >= MAX_PRIVATE_CHATS_PER_PAIR:
             raise HTTPException(
                 400,
                 f"You already have {MAX_PRIVATE_CHATS_PER_PAIR} private chats with "
                 f"{target['username']} - delete one to start another"
             )
 
-        cursor = await db.execute(
-            """INSERT INTO conversations (type, title, created_by, user_low_id, user_high_id, is_group)
-               VALUES ('dm', '', ?, ?, ?, 0)""",
-            (uid, low, high)
-        )
-        cid = cursor.lastrowid
         now = int(time.time())
-        await db.executemany(
-            "INSERT OR IGNORE INTO conversation_members "
-            "(conversation_id, user_id, joined_at, status, role) VALUES (?, ?, ?, 'accepted', 'member')",
-            [(cid, uid, now), (cid, target_id, now)]
-        )
+        if reusable_id is not None:
+            cid = reusable_id
+            await db.execute(
+                "UPDATE conversation_members SET status = 'accepted' "
+                "WHERE conversation_id = ? AND user_id = ?",
+                (cid, uid)
+            )
+            other = await _membership(db, cid, target_id)
+            target_status = other.get("status") if other else None
+            if not other:
+                await db.execute(
+                    "INSERT INTO conversation_members "
+                    "(conversation_id, user_id, joined_at, status, role) VALUES (?, ?, ?, 'pending', 'member')",
+                    (cid, target_id, now)
+                )
+            elif target_status != "pending":
+                # Re-invite: the recipient has to accept again even if they had
+                # accepted before the chat was hidden/left.
+                await db.execute(
+                    "UPDATE conversation_members SET status = 'pending', role = 'member' "
+                    "WHERE conversation_id = ? AND user_id = ?",
+                    (cid, target_id)
+                )
+        else:
+            cursor = await db.execute(
+                """INSERT INTO conversations (type, title, created_by, user_low_id, user_high_id, is_group)
+                   VALUES ('dm', '', ?, ?, ?, 0)""",
+                (uid, low, high)
+            )
+            cid = cursor.lastrowid
+            await db.execute(
+                "INSERT INTO conversation_members "
+                "(conversation_id, user_id, joined_at, status, role) VALUES (?, ?, ?, 'accepted', 'member')",
+                (cid, uid, now)
+            )
+            await db.execute(
+                "INSERT INTO conversation_members "
+                "(conversation_id, user_id, joined_at, status, role) VALUES (?, ?, ?, 'pending', 'member')",
+                (cid, target_id, now)
+            )
         await db.commit()
         schedule_db_sync()
 
@@ -1208,13 +1288,15 @@ async def create_dm_rest(
         summary = await _create_dm(db, user['id'], user_id, manager)
         if summary is None:
             raise HTTPException(400, "Could not create private chat")
-        # Live-push the new conversation to both members (sidebar updates)
+        # Live-push the new conversation. The initiator gets it immediately; the
+        # recipient gets a pending conversation_updated they must accept.
         online = {u["id"] for u in manager.get_online_users()}
         await manager.send_to_user(user['id'], {"type": "dm_created", "conversation": summary})
         peer = summary.get("peer") or {}
         if peer.get("id"):
             peer_summary = await _build_conversation_summary(db, summary["id"], peer["id"], online)
-            await manager.send_to_user(peer["id"], {"type": "dm_created", "conversation": peer_summary})
+            await manager.send_to_user(peer["id"], {"type": "conversation_updated",
+                                                    "conversation": peer_summary})
         return {"conversation": summary}
     finally:
         await db.close()
@@ -1308,7 +1390,7 @@ async def create_group_rest(
 async def _accept_conversation_invite(db: aiosqlite.Connection, uid: int, cid: int) -> dict:
     member = await _membership(db, cid, uid)
     if not member or member.get("status") != "pending":
-        raise HTTPException(404, "You don't have a pending invite to this group")
+        raise HTTPException(404, "You don't have a pending invite to this conversation")
     if await _conversation_blocked(db, cid, uid):
         raise HTTPException(403, "This conversation is hidden because of a block")
     await db.execute(
@@ -1323,11 +1405,21 @@ async def _accept_conversation_invite(db: aiosqlite.Connection, uid: int, cid: i
 async def _reject_conversation_invite(db: aiosqlite.Connection, uid: int, cid: int) -> bool:
     member = await _membership(db, cid, uid)
     if not member or member.get("status") != "pending":
-        raise HTTPException(404, "You don't have a pending invite to this group")
+        raise HTTPException(404, "You don't have a pending invite to this conversation")
     await db.execute("DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?",
                      (cid, uid))
     await db.commit()
     schedule_db_sync()
+    # Tell the people who remain (e.g. the initiator) that this invite was
+    # declined so they are not left wondering why the chat is still pending.
+    online = {u["id"] for u in manager.get_online_users()}
+    for mid in await _group_update_recipient_ids(db, cid):
+        await manager.send_to_user(mid, {
+            "type": "conversation_updated",
+            "conversation": await _build_conversation_summary(db, cid, mid, online),
+            "invite_rejected": True,
+            "rejected_user_id": uid,
+        })
     return True
 
 
@@ -1467,6 +1559,77 @@ async def rename_conversation_rest(
         await db.close()
 
 
+async def _hard_delete_conversation(db: aiosqlite.Connection, cid: int):
+    """Permanently remove a conversation, its messages, receipts and members."""
+    await db.execute(
+        "DELETE FROM read_receipts WHERE message_id IN "
+        "(SELECT id FROM messages WHERE conversation_id = ?)", (cid,)
+    )
+    await db.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
+    await db.execute("DELETE FROM conversation_members WHERE conversation_id = ?", (cid,))
+    await db.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+
+
+async def _delete_dm_side(db: aiosqlite.Connection, cid: int, uid: int,
+                          conv: dict) -> dict:
+    """Hide a private chat for `uid`, or delete it for everyone when no accepted
+    peer remains.
+
+    Return the status to report back to the caller.
+    """
+    member = await _membership(db, cid, uid)
+    if not member:
+        raise HTTPException(404, "You are not part of this private chat")
+    if member.get("status") == "left":
+        return {"status": "hidden", "conversation_id": cid}
+    if member.get("status") != "accepted":
+        raise HTTPException(403, "Accept or reject the invite before deleting this chat")
+
+    other_id = conv["user_high_id"] if conv["user_low_id"] == uid else conv["user_low_id"]
+    other = await _membership(db, cid, other_id) if other_id else None
+    other_active = other and other.get("status") == "accepted"
+    online = {u["id"] for u in manager.get_online_users()}
+
+    if not other_active:
+        # No one else has actually accepted: cancel/delete the chat for everyone.
+        await _hard_delete_conversation(db, cid)
+        await db.commit()
+        schedule_db_sync()
+        notify = {uid}
+        if other is not None:
+            notify.add(other_id)
+        for mid in notify:
+            await manager.send_to_user(mid, {
+                "type": "conversation_deleted",
+                "conversation_id": cid,
+            })
+        return {"status": "deleted", "conversation_id": cid}
+
+    # The other person is still in the chat: hide it only for the current user.
+    await db.execute(
+        "UPDATE conversation_members SET status = 'left' "
+        "WHERE conversation_id = ? AND user_id = ?",
+        (cid, uid)
+    )
+    await db.commit()
+    schedule_db_sync()
+
+    await manager.send_to_user(uid, {
+        "type": "conversation_left",
+        "conversation_id": cid,
+        "user_id": uid,
+        "reason": "deleted",
+    })
+    await manager.send_to_user(other_id, {
+        "type": "conversation_left",
+        "conversation_id": cid,
+        "user_id": uid,
+        "reason": "deleted",
+        "conversation": await _build_conversation_summary(db, cid, other_id, online),
+    })
+    return {"status": "hidden", "conversation_id": cid}
+
+
 @app.delete("/api/conversations/{conversation_id}")
 async def delete_or_leave_conversation_rest(
     conversation_id: int,
@@ -1482,19 +1645,19 @@ async def delete_or_leave_conversation_rest(
         conv = await cursor.fetchone()
         if not conv:
             raise HTTPException(404, "Conversation not found")
+
+        # Private chats hide for the deleting user; they are only removed for
+        # everyone when the other person also deletes (or never accepted).
         if conv["is_group"] != 1:
-            raise HTTPException(400, "Only group chats can be left or deleted")
+            return await _delete_dm_side(db, conversation_id, user['id'], conv)
+
         if not member or member.get("status") != "accepted":
             raise HTTPException(403, "You are not a member of this group")
 
         notify_ids = await _group_update_recipient_ids(db, conversation_id)
         # Owner deletes the group permanently; members leave the group.
         if member and member.get("role") == "owner" and member.get("status") == "accepted":
-            await db.execute("DELETE FROM read_receipts WHERE message_id IN "
-                             "(SELECT id FROM messages WHERE conversation_id = ?)", (conversation_id,))
-            await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
-            await db.execute("DELETE FROM conversation_members WHERE conversation_id = ?", (conversation_id,))
-            await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            await _hard_delete_conversation(db, conversation_id)
             await db.commit()
             schedule_db_sync()
             for mid in notify_ids:
@@ -2210,14 +2373,15 @@ async def ws_endpoint(ws: WebSocket, token: str = Query(...)):
                     })
                     peer = summary.get("peer") or {}
                     online = {u["id"] for u in manager.get_online_users()}
-                    # Send the same conversation into the other person's sidebar
+                    # The recipient gets a pending invite (must accept), not a
+                    # ready-to-use chat.
                     if peer.get("id"):
                         db2 = await get_db()
                         try:
                             peer_summary = await _build_conversation_summary(
                                 db2, summary["id"], peer["id"], online)
                             await manager.send_to_user(peer["id"], {
-                                "type": "dm_created",
+                                "type": "conversation_updated",
                                 "conversation": peer_summary,
                             })
                         finally:

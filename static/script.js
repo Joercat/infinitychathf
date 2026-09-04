@@ -124,7 +124,8 @@
         convOptionsBtn: $('conv-options-btn'), convOptionsModal: $('conv-options-modal'),
         convOptionsTitle: $('conv-options-title'),
         renameConvBtn: $('rename-conv-btn'), addGroupMembersBtn: $('add-group-members-btn'),
-        blockConvUserBtn: $('block-conv-user-btn'), leaveConvBtn: $('leave-conv-btn'),
+        deleteConvBtn: $('delete-conv-btn'), blockConvUserBtn: $('block-conv-user-btn'),
+        leaveConvBtn: $('leave-conv-btn'),
         refreshBlocksBtn: $('refresh-blocks-btn'), blockedUsersList: $('blocked-users-list'),
 
         settingsDisplayName: $('settings-display-name'), settingsUsername: $('settings-username'),
@@ -758,10 +759,14 @@
         State.isAtBottom = true;
 
         const cache = getConv(convId);
+        const conv = convById(convId);
         renderConversationHeader(convId);
         renderSidebar();
 
-        if (cache.ids.length === 0) {
+        if (conv && conv.is_pending) {
+            cache.loading = false;
+            renderPendingInvite(convId);
+        } else if (cache.ids.length === 0) {
             cache.loading = true;
             loadMessages(convId);
             renderEmptyLoading(convId);
@@ -791,6 +796,18 @@
         DOM.loadOlderBtn.classList.add('hidden');
     }
 
+    function renderPendingInvite(convId) {
+        DOM.messagesList.innerHTML = '';
+        if (DOM.emptyState.parentNode !== DOM.messagesList) DOM.messagesList.appendChild(DOM.emptyState);
+        const conv = convById(convId);
+        const name = conv ? (conv.custom_name || conv.title || (conv.peer ? displayNameOf(conv.peer) : 'this chat')) : 'this chat';
+        DOM.emptyIcon.innerHTML = '<i class="fas fa-envelope-open-text"></i>';
+        DOM.emptyTitle.textContent = 'Invite pending';
+        DOM.emptySub.textContent = `Accept the invite for ${name} from the sidebar to start chatting.`;
+        DOM.emptyState.style.display = 'flex';
+        DOM.loadOlderBtn.classList.add('hidden');
+    }
+
     function renderConversationHeader(convId) {
         const conv = convById(convId);
         if (!conv) return;
@@ -813,9 +830,15 @@
             const online = peer.online || State.onlineUsers.has(peer.id);
             DOM.convPresenceDot.classList.remove('hidden');
             DOM.convPresenceDot.classList.toggle('offline', !online);
-            DOM.convSubtitle.innerHTML = online
-                ? '<span class="status-dot online"></span> Online'
-                : escapeHtml(formatLastSeen(peer.last_seen));
+            if (conv.peer_removed) {
+                DOM.convSubtitle.innerHTML = '<span class="status-dot warn"></span> They no longer want to chat';
+            } else if (conv.is_pending) {
+                DOM.convSubtitle.innerHTML = '<span class="status-dot warn"></span> Invite pending — accept to start chatting';
+            } else {
+                DOM.convSubtitle.innerHTML = online
+                    ? '<span class="status-dot online"></span> Online'
+                    : escapeHtml(formatLastSeen(peer.last_seen));
+            }
             DOM.onlineBtn.style.display = '';
             DOM.convAvatarPh.style.display = '';
             DOM.convAvatar.style.display = '';
@@ -1018,6 +1041,9 @@
                 if (msg.conversation.id === State.activeConvId) {
                     renderConversationHeader(State.activeConvId);
                 }
+                if (msg.invite_rejected && msg.rejected_user_id && msg.rejected_user_id !== State.user?.id) {
+                    showToast('The invite was declined', 'info');
+                }
                 break;
 
             case 'conversation_deleted': {
@@ -1027,7 +1053,7 @@
                 State.messages.forEach(m => { if (m.conversation_id === cid) State.messages.delete(m.id); });
                 if (State.activeConvId === cid) switchConversation(GLOBAL_CONV);
                 renderSidebar();
-                showToast('A group chat was deleted', 'info');
+                showToast('The chat was deleted', 'info');
                 break;
             }
 
@@ -1039,6 +1065,10 @@
                     if (State.activeConvId === cid) switchConversation(GLOBAL_CONV);
                 } else if (msg.conversation) {
                     upsertConversation(msg.conversation);
+                    if (msg.reason === 'deleted') {
+                        const peer = msg.conversation.peer;
+                        showToast(`${peer ? displayNameOf(peer) : 'The other person'} no longer wants to chat`, 'info');
+                    }
                 }
                 renderSidebar();
                 break;
@@ -1066,7 +1096,7 @@
                 upsertConversation(msg.conversation);
                 const peer = msg.conversation.peer;
                 if (peer && peer.id !== State.user?.id) {
-                    showToast(`Private chat with ${displayNameOf(peer)} created`, 'success');
+                    showToast(`Private chat with ${displayNameOf(peer)} started — waiting for them to accept`, 'success');
                     switchConversation(msg.conversation.id);
                 }
                 break;
@@ -2068,7 +2098,7 @@
         if (!content && !State.pendingFile) return;
         if (!State.activeConvId) { showToast('No conversation selected', 'warning'); return; }
         const active = convById(State.activeConvId);
-        if (active && active.is_pending) { showToast('Accept the group invite first', 'warning'); return; }
+        if (active && active.is_pending) { showToast('Accept the invite first', 'warning'); return; }
         if (!wsOpen()) {
             showToast('Not connected - message queued, sending when reconnected', 'warning');
         }
@@ -2224,7 +2254,7 @@
             upsertConversation(data.conversation);
             closeModal(DOM.convModal);
             switchConversation(data.conversation.id);
-            showToast(`Private chat with ${peerName} started`, 'success');
+            showToast(`Private chat with ${peerName} started — waiting for them to accept`, 'success');
         } catch (err) {
             showToast(err.message, 'error');
             finish();
@@ -2516,12 +2546,12 @@
             if (action === 'accept') {
                 upsertConversation(data.conversation);
                 switchConversation(cid);
-                showToast('Group invite accepted', 'success');
+                showToast('Invite accepted', 'success');
             } else {
                 State.conversations.delete(cid);
                 State.convCache.delete(cid);
                 renderSidebar();
-                showToast('Group invite rejected', 'info');
+                showToast('Invite declined', 'info');
             }
         } catch (err) {
             showToast(err.message, 'error');
@@ -2656,6 +2686,7 @@
         const pending = !!conv.is_pending;
         DOM.renameConvBtn.style.display = pending ? 'none' : '';
         DOM.addGroupMembersBtn.style.display = conv.is_group && !pending ? '' : 'none';
+        DOM.deleteConvBtn.style.display = (!conv.is_group && conv.peer && !pending) ? '' : 'none';
         DOM.blockConvUserBtn.style.display = (!conv.is_group && conv.peer) ? '' : 'none';
         DOM.leaveConvBtn.style.display = (conv.is_group && !pending) ? '' : 'none';
         DOM.convOptionsTitle.innerHTML = `<i class="fas fa-ellipsis-h"></i> ${escapeHtml(conv.custom_name || conv.title || 'Chat Options')}`;
@@ -2693,6 +2724,27 @@
         DOM.groupModal.dataset.groupId = conv.id;
         loadGroupUsers();
         openModal(DOM.groupModal);
+    });
+
+    DOM.deleteConvBtn.addEventListener('click', async () => {
+        const conv = convById(State.activeConvId);
+        closeModal(DOM.convOptionsModal);
+        if (!conv || conv.is_group || !conv.peer) return;
+        const ok = await showConfirm({
+            title: 'Delete private chat',
+            message: `Delete this chat with ${displayNameOf(conv.peer)}? It will be hidden for you. If they also delete it, it is removed for everyone. They will be told that you no longer want to chat.`,
+            okText: 'Delete Chat'
+        });
+        if (!ok) return;
+        try {
+            const data = await apiDelete(`/api/conversations/${conv.id}`);
+            State.conversations.delete(conv.id);
+            State.convCache.delete(conv.id);
+            if (State.activeConvId === conv.id) switchConversation(GLOBAL_CONV);
+            renderSidebar();
+            showToast(data.status === 'deleted' ? 'Chat deleted' : 'Chat hidden for you', 'success');
+            requestConversations();
+        } catch (err) { showToast(err.message, 'error'); }
     });
 
     DOM.blockConvUserBtn.addEventListener('click', async () => {
