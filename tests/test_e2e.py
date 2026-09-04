@@ -434,6 +434,28 @@ async def main():
                             headers={"X-Auth-Token": bob.token})
         check(r.status_code == 403, "blocked user cannot start new dm")
 
+        # the global room must stay usable while a pair is blocked
+        await alice.drain(0.3)
+        await bob.drain(0.3)
+        await alice.send({"type": "send_message", "content": "global while blocked",
+                          "conversation_id": 1, "client_id": "gblock1"})
+        echo = await alice.expect("new_message")
+        check(echo["message"]["content"] == "global while blocked",
+              "blocker can still use the global room")
+        got = await wait_events([bob], "new_message")
+        check(any(m["message"].get("content") == "global while blocked" for m in got["bob"]),
+              "blocked user still receives global-room messages", str(got["bob"][:1]))
+        await alice.drain(0.2)
+        await bob.drain(0.2)
+        await bob.send({"type": "send_message", "content": "from blocked user in global",
+                        "conversation_id": 1, "client_id": "gblock2"})
+        echo = await bob.expect("new_message")
+        check(echo["message"]["content"] == "from blocked user in global",
+              "blocked user can still send in the global room")
+        got = await wait_events([alice], "new_message")
+        check(any(m["message"].get("content") == "from blocked user in global" for m in got["alice"]),
+              "blocker still receives messages from blocked user in global room", str(got["alice"][:1]))
+
         # unblock restores the hidden chat (still stored, never deleted)
         r = await http.delete(f"{BASE}/api/users/{bob.user['id']}/block",
                               headers={"X-Auth-Token": alice.token})
