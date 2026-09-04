@@ -258,12 +258,14 @@ async def init_database():
             (GLOBAL_CONVERSATION_ID,)
         )
 
-        # Backfill: any message that somehow predates conversations gets the lobby
+        # Backfill: any message that somehow predates conversations gets the lobby.
+        # Only do this when there is no matching conversation id at all (NULL or
+        # missing) — never rewrite valid DM/group messages back to Global.
         await db.execute(
             "UPDATE messages SET conversation_id = ? "
             "WHERE conversation_id IS NULL OR conversation_id NOT IN "
-            "(SELECT id FROM conversations WHERE id = ?)",
-            (GLOBAL_CONVERSATION_ID, GLOBAL_CONVERSATION_ID)
+            "(SELECT id FROM conversations)",
+            (GLOBAL_CONVERSATION_ID,)
         )
 
         # --- Indexes ---

@@ -184,8 +184,17 @@ con.execute(
     "VALUES (?, ?, strftime('%s','now'), 'pending', 'member')",
     (gid, 2)
 )
+# Regression: on restart the startup backfill used to rewrite every DM/group
+# message back into Global (id 1) because its NOT IN list only contained id 1.
+# Put a real message in this non-global conversation and ensure it survives.
+con.execute(
+    "INSERT INTO messages (sender_id, encrypted_content, timestamp_ms, conversation_id) "
+    "VALUES (1, 'CIPHERTEXT_DM', 1700000003000, ?)",
+    (gid,)
+)
 con.commit()
 convs_before_second = con.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+msgs_before_second = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 con.close()
 
 # ------------------------------------------------------------------
@@ -200,13 +209,18 @@ rc2 = con.execute("SELECT read_at FROM read_receipts WHERE user_id=1 AND message
 pend = con.execute(
     "SELECT status FROM conversation_members WHERE conversation_id=? AND user_id=2", (gid,)
 ).fetchone()
+dm_msg = con.execute(
+    "SELECT conversation_id FROM messages WHERE encrypted_content='CIPHERTEXT_DM'"
+).fetchone()
 con.close()
-if n2 != n_msgs or c2 != convs_before_second or u2 != n_users:
-    failures.append(f"second run duplicated/lost data: msgs {n_msgs}->{n2}, convs {convs_before_second}->{c2}, users {n_users}->{u2}")
+if n2 != msgs_before_second or c2 != convs_before_second or u2 != n_users:
+    failures.append(f"second run duplicated/lost data: msgs {msgs_before_second}->{n2}, convs {convs_before_second}->{c2}, users {n_users}->{u2}")
 if rc2 != 1700000002000:
     failures.append(f"read_at re-multiplied on second run: {rc2}")
 if not pend or pend[0] != "pending":
     failures.append(f"pending invite was not preserved across restart: {pend}")
+if not dm_msg or dm_msg[0] != gid:
+    failures.append(f"private-chat message was moved to Global on restart: {dm_msg}")
 
 print("\n==== RESULT ====")
 if failures:
