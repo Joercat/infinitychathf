@@ -2592,4 +2592,4 @@ async def ws_endpoint(ws: WebSocket, token: str = Query(...)):
 
 @app.get("/")
 async def root():
-    return FileResponse("static/index.html")
+    return FileResponse("static/index.html", headers={"Cache-Control": "no-cache"})
