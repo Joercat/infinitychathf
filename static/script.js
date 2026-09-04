@@ -822,7 +822,7 @@
         } else if (isGroup) {
             DOM.convTitle.textContent = conv.custom_name || conv.title || 'Group Chat';
             const gm = conv.members && conv.members.length ? conv.members.filter(m => m.status === 'accepted') : [];
-            const onlineCount = gm.filter(m => m.online && m.id !== State.user?.id).length;
+            const onlineCount = gm.filter(m => m.online).length;
             DOM.convAvatar.classList.add('hidden');
             DOM.convAvatarPh.classList.remove('hidden');
             DOM.convAvatarPh.className = 'conv-avatar-ph avatar-c2';
