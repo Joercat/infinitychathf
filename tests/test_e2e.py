@@ -198,9 +198,9 @@ async def main():
         await bob.send({"type": "load_messages", "conversation_id": 1, "limit": 100})
         bl = await bob.expect("messages_loaded")
         check(all(m["id"] != dmsg["id"] for m in bl["messages"]), "deleted msg absent from history")
-        # double delete is idempotent-ish (404)
+        # double delete is idempotent (200 "already_deleted")
         r = await http.delete(f"{BASE}/api/messages/{dmsg['id']}", headers={"X-Auth-Token": alice.token})
-        check(r.status_code == 404, "second delete 404 (no crash)")
+        check(r.status_code == 200, "second delete is a no-op (no crash)")
         # deleting someone else's message forbidden
         r = await http.delete(f"{BASE}/api/messages/{mid}", headers={"X-Auth-Token": bob.token})
         check(r.status_code == 404 or r.status_code == 403, "can't delete others' msg", r.text[:100])
@@ -324,6 +324,125 @@ async def main():
         await alice.send({"type": "load_messages", "conversation_id": 1, "limit": 100})
         allmsg = (await alice.expect("messages_loaded"))["messages"]
         check(sum(1 for m in allmsg if m["content"] == "dedupe me") == 1, "no duplicate messages stored")
+
+        # ---- group chats, invites, blocking and renaming ----
+        await alice.drain(0.4)
+        await bob.drain(0.4)
+        r = await http.post(f"{BASE}/api/conversations/group?name=Group Test&member_ids={bob.user['id']}",
+                            headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200, "group create ok", r.text[:200])
+        group = r.json()["conversation"]
+        gid = group["id"]
+        check(group["is_group"] is True and group["role"] == "owner", "creator is group owner")
+
+        # bob receives a pending invite and must accept before chatting
+        pending = await bob.expect("conversation_updated", 6)
+        check(pending["conversation"]["id"] == gid and pending["conversation"]["is_pending"],
+              "bob gets pending group invite")
+        r = await http.post(f"{BASE}/api/conversations/{gid}/accept", headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 200 and r.json()["conversation"]["is_pending"] is False,
+              "bob accepts invite")
+        await alice.drain(0.3)
+        await bob.drain(0.3)
+
+        # rename the group; everyone else sees it
+        r = await http.patch(f"{BASE}/api/conversations/{gid}?name=Renamed Group",
+                             headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200 and r.json()["conversation"]["custom_name"] == "Renamed Group",
+              "group rename ok")
+        renamed = await bob.expect("conversation_updated", 6)
+        check(renamed["conversation"]["custom_name"] == "Renamed Group", "bob sees renamed group")
+
+        # non-owner leaves; owner can delete afterwards
+        r = await http.delete(f"{BASE}/api/conversations/{gid}", headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 200 and r.json()["status"] == "left", "group member can leave")
+        r = await http.delete(f"{BASE}/api/conversations/{gid}", headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200 and r.json()["status"] == "deleted", "owner can delete group")
+
+        # ---- group invites stay acceptable and pending users cannot act ----
+        charlie = Client("charlie")
+        r = await http.post(f"{BASE}/api/auth/signup?username=charlie&password=password123&display_name=Charlie")
+        check(r.status_code == 200, "signup charlie", r.text[:200])
+        charlie.token = r.json()["token"]
+        charlie.user = r.json()["user"]
+
+        await alice.drain(0.3)
+        await bob.drain(0.3)
+        r = await http.post(
+            f"{BASE}/api/conversations/group?name=Invite Group&member_ids={bob.user['id']},{charlie.user['id']}",
+            headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200, "group with two invitees created", r.text[:200])
+        g2id = r.json()["conversation"]["id"]
+
+        pend = await bob.expect("conversation_updated", 6)
+        check(pend["conversation"]["id"] == g2id and pend["conversation"]["is_pending"],
+              "second group invite arrives as pending")
+
+        # A pending invitee cannot leave, rename, send, or add members.
+        r = await http.delete(f"{BASE}/api/conversations/{g2id}", headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 403, "pending user cannot leave", r.text[:120])
+        r = await http.patch(f"{BASE}/api/conversations/{g2id}?name=Nope", headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 403, "pending user cannot rename", r.text[:120])
+        await bob.send({"type": "send_message", "conversation_id": g2id,
+                        "content": "should not send", "client_id": "pending-send"})
+        send_err = await bob.expect("error", 6)
+        check(send_err.get("code") == "FORBIDDEN", "pending user cannot send", send_err.get("message", ""))
+        r = await http.post(f"{BASE}/api/conversations/{g2id}/members?member_ids={alice.user['id']}",
+                            headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 403, "pending user cannot add members", r.text[:120])
+
+        # Rejecting removes the pending row.
+        r = await http.post(f"{BASE}/api/conversations/{g2id}/reject", headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 200 and r.json()["status"] == "rejected", "pending user can reject invite")
+
+        # A future re-invite must go through acceptance again.
+        await alice.drain(0.3)
+        await bob.drain(0.3)
+        r = await http.post(f"{BASE}/api/conversations/{g2id}/members?member_ids={bob.user['id']}",
+                            headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200, "owner can re-invite after reject", r.text[:200])
+        re_pend = await bob.expect("conversation_updated", 6)
+        check(re_pend["conversation"]["id"] == g2id and re_pend["conversation"]["is_pending"],
+              "re-invite needs acceptance again")
+        r = await http.post(f"{BASE}/api/conversations/{g2id}/accept", headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 200 and r.json()["conversation"]["is_pending"] is False,
+              "bob accepts the re-invite")
+        r = await http.post(f"{BASE}/api/conversations/{g2id}/accept", headers={"X-Auth-Token": charlie.token})
+        check(r.status_code == 200 and r.json()["conversation"]["is_pending"] is False,
+              "charlie accepts its own invite independently")
+        await alice.drain(0.3)
+        await bob.drain(0.3)
+
+        # Owner can also delete a group that still has pending/unopened invites.
+        r = await http.delete(f"{BASE}/api/conversations/{g2id}", headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200 and r.json()["status"] == "deleted", "owner can delete group with invites")
+
+        # blocking hides all existing chats but does not delete them
+        pre_block = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": alice.token})
+        check(any(c["id"] == dmid for c in pre_block.json()["conversations"]), "dm exists before block")
+        r = await http.post(f"{BASE}/api/users/{bob.user['id']}/block",
+                            headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200, "alice blocks bob")
+        blocked_event = await bob.expect("block_changed", 6)
+        check(blocked_event["blocked"] is True and blocked_event["blocker_id"] == alice.user["id"],
+              "blocked user is notified")
+        r = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": alice.token})
+        check(all(c["id"] != dmid for c in r.json()["conversations"]), "blocked dm hidden for blocker")
+        r = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": bob.token})
+        check(all(c["id"] != dmid for c in r.json()["conversations"]), "blocked dm hidden for blocked user")
+        r = await http.post(f"{BASE}/api/conversations/dm?user_id={alice.user['id']}",
+                            headers={"X-Auth-Token": bob.token})
+        check(r.status_code == 403, "blocked user cannot start new dm")
+
+        # unblock restores the hidden chat (still stored, never deleted)
+        r = await http.delete(f"{BASE}/api/users/{bob.user['id']}/block",
+                              headers={"X-Auth-Token": alice.token})
+        check(r.status_code == 200, "unblock ok")
+        await alice.drain(0.3)
+        await bob.drain(0.3)
+        after = await http.get(f"{BASE}/api/conversations", headers={"X-Auth-Token": alice.token})
+        check(any(c["id"] == dmid for c in after.json()["conversations"]),
+              "hidden dm returns after unblock")
 
         # ---- auth edge ----
         r = await http.get(BASE + "/api/auth/verify", headers={"X-Auth-Token": "bogus"})

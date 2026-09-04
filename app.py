@@ -165,6 +165,19 @@ async def init_database():
             )
         """)
 
+        # Blocking: one-way rows (A blocks B). Chat creation/access is restricted
+        # when either user in a pair has blocked the other.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_blocks (
+                blocker_id INTEGER NOT NULL,
+                blocked_id INTEGER NOT NULL,
+                created_at INTEGER DEFAULT (strftime('%s','now')),
+                PRIMARY KEY (blocker_id, blocked_id),
+                FOREIGN KEY(blocker_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(blocked_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+
         # --- Additive migrations for databases created before v2 ---
         msg_cols = await _table_columns(db, "messages")
         if "conversation_id" not in msg_cols:
@@ -186,6 +199,46 @@ async def init_database():
         }.items():
             if col not in usr_cols:
                 await _ensure_column(db, "users", col, ddl)
+
+        conv_cols = await _table_columns(db, "conversations")
+        for col, ddl in {
+            "is_group": "INTEGER NOT NULL DEFAULT 0",
+            "custom_name": "TEXT",
+        }.items():
+            if col not in conv_cols:
+                await _ensure_column(db, "conversations", col, ddl)
+
+        cm_cols = await _table_columns(db, "conversation_members")
+        for col, ddl in {
+            "status": "TEXT NOT NULL DEFAULT 'accepted'",
+            "role": "TEXT NOT NULL DEFAULT 'member'",
+        }.items():
+            if col not in cm_cols:
+                await _ensure_column(db, "conversation_members", col, ddl)
+
+        # Existing memberships predate invites/roles: make them accepted.
+        await db.execute(
+            "UPDATE conversation_members SET status = 'accepted' "
+            "WHERE status IS NULL OR status = '' OR status = 'pending'"
+        )
+        await db.execute(
+            "UPDATE conversation_members SET role = 'member' "
+            "WHERE role IS NULL OR role = ''"
+        )
+        # Group owner is the first accepted member of each group with no owner.
+        await db.execute("""
+            UPDATE conversation_members
+            SET role = 'owner'
+            WHERE conversation_id IN (
+                SELECT id FROM conversations WHERE is_group = 1
+            )
+              AND user_id = (
+                  SELECT user_id FROM conversation_members cm
+                  WHERE cm.conversation_id = conversation_members.conversation_id
+                    AND cm.status = 'accepted'
+                  ORDER BY cm.joined_at ASC, cm.user_id ASC LIMIT 1
+              )
+        """)
 
         rc_cols = await _table_columns(db, "read_receipts")
         if "read_at" not in rc_cols:
@@ -221,8 +274,14 @@ async def init_database():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_receipts_user_msg ON read_receipts(user_id, message_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_receipts_message ON read_receipts(message_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_members_user ON conversation_members(user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_members_status "
+                         "ON conversation_members(user_id, status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_dm_pair "
                          "ON conversations(type, user_low_id, user_high_id) WHERE type = 'dm'")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_blocks_blocked "
+                         "ON user_blocks(blocked_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_blocks_blocker "
+                         "ON user_blocks(blocker_id)")
         await db.commit()
 
     upload_database(DATABASE_URL)
@@ -364,27 +423,121 @@ async def authenticate_user(token: str) -> Optional[dict]:
 # ------------------------------------------------------------------------
 # Conversation helpers
 # ------------------------------------------------------------------------
-async def user_in_conversation(db: aiosqlite.Connection, uid: int, cid: int) -> bool:
-    """Everyone is in the global lobby; private chats require a membership row."""
-    if cid == GLOBAL_CONVERSATION_ID:
-        return True
+async def _block_exists(db: aiosqlite.Connection, a: int, b: int) -> bool:
+    """True when blocking exists in either direction (mutual restriction)."""
+    if a == b:
+        return False
     cursor = await db.execute(
-        "SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ?",
-        (cid, uid)
+        "SELECT 1 FROM user_blocks WHERE (blocker_id = ? AND blocked_id = ?) "
+        "OR (blocker_id = ? AND blocked_id = ?) LIMIT 1",
+        (a, b, b, a)
     )
     return await cursor.fetchone() is not None
 
 
-async def conversation_member_ids(db: aiosqlite.Connection, cid: int) -> List[int]:
-    """All member ids of a conversation (for scoped broadcasts)."""
+async def _conversation_blocked(db: aiosqlite.Connection, cid: int, uid: int) -> bool:
+    """A non-global conversation is hidden when the user blocks (or is blocked by)
+    any other accepted member."""
     if cid == GLOBAL_CONVERSATION_ID:
-        # Global lobby membership is implicit for every account.
+        return False
+    member_ids = await _raw_conversation_member_ids(db, cid)
+    for mid in member_ids:
+        if mid != uid and await _block_exists(db, uid, mid):
+            return True
+    return False
+
+
+async def _membership(db: aiosqlite.Connection, cid: int, uid: int) -> Optional[dict]:
+    cursor = await db.execute(
+        "SELECT * FROM conversation_members WHERE conversation_id = ? AND user_id = ?",
+        (cid, uid)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def user_in_conversation(db: aiosqlite.Connection, uid: int, cid: int) -> bool:
+    """Everyone is in the global lobby; other chats require an accepted membership
+    and no active block with another member."""
+    if cid == GLOBAL_CONVERSATION_ID:
+        return True
+    member = await _membership(db, cid, uid)
+    if not member or member.get("status") != "accepted":
+        return False
+    if await _conversation_blocked(db, cid, uid):
+        return False
+    return True
+
+
+async def _raw_conversation_member_ids(db: aiosqlite.Connection, cid: int) -> List[int]:
+    if cid == GLOBAL_CONVERSATION_ID:
         cursor = await db.execute("SELECT id FROM users")
         return [r["id"] for r in await cursor.fetchall()]
     cursor = await db.execute(
-        "SELECT user_id FROM conversation_members WHERE conversation_id = ?", (cid,)
+        "SELECT user_id FROM conversation_members "
+        "WHERE conversation_id = ? AND status = 'accepted'",
+        (cid,)
     )
     return [r["user_id"] for r in await cursor.fetchall()]
+
+
+async def _blocked_member_ids(db: aiosqlite.Connection, cid: int) -> set:
+    """Members of a non-global conversation who are in a mutual block pair with
+    another accepted member. Those members are excluded from live broadcasts so
+    hidden/blocked chats never leak messages."""
+    if cid == GLOBAL_CONVERSATION_ID:
+        return set()
+    member_ids = await _raw_conversation_member_ids(db, cid)
+    blocked = set()
+    for mid in member_ids:
+        for other in member_ids:
+            if mid != other and await _block_exists(db, mid, other):
+                blocked.add(mid)
+                blocked.add(other)
+    return blocked
+
+
+async def conversation_member_ids(db: aiosqlite.Connection, cid: int) -> List[int]:
+    """Accepted member ids of a conversation (for scoped broadcasts).
+
+    Global broadcasts include everyone. Non-global broadcasts exclude users who
+    are in a block pair so hidden chats never leak messages."""
+    member_ids = await _raw_conversation_member_ids(db, cid)
+    if cid == GLOBAL_CONVERSATION_ID:
+        return member_ids
+    blocked = await _blocked_member_ids(db, cid)
+    return [mid for mid in member_ids if mid not in blocked]
+
+
+async def _group_update_recipient_ids(db: aiosqlite.Connection, cid: int) -> List[int]:
+    """Recipients for group summary/update/deleted events.
+
+    Includes accepted members and pending invitees, but still excludes anyone
+    who has an active block with another member of the group so hidden chats
+    never leak through live events."""
+    if cid == GLOBAL_CONVERSATION_ID:
+        return []
+    ids = await _raw_conversation_member_ids(db, cid)
+    cursor = await db.execute(
+        "SELECT user_id FROM conversation_members WHERE conversation_id = ? AND status = 'pending'",
+        (cid,)
+    )
+    ids += [r["user_id"] for r in await cursor.fetchall()]
+    return [mid for mid in ids if not await _conversation_blocked(db, cid, mid)]
+
+
+async def _conversation_member_rows(db: aiosqlite.Connection, cid: int, include_pending: bool = False) -> List[dict]:
+    cond = "" if include_pending else "AND cm.status = 'accepted'"
+    cursor = await db.execute(
+        f"""SELECT u.id, u.username, u.display_name, u.avatar_path,
+                   cm.status, cm.role, cm.joined_at, u.status AS user_status,
+                   u.last_seen
+            FROM conversation_members cm JOIN users u ON u.id = cm.user_id
+            WHERE cm.conversation_id = ? {cond}
+            ORDER BY cm.joined_at ASC, u.id ASC""",
+        (cid,)
+    )
+    return [dict(r) for r in await cursor.fetchall()]
 
 
 async def _ensure_global_member(db: aiosqlite.Connection, uid: int):
@@ -397,7 +550,8 @@ async def _ensure_global_member(db: aiosqlite.Connection, uid: int):
     max_id = row["max_id"] or 0
     await db.execute(
         "INSERT OR IGNORE INTO conversation_members "
-        "(conversation_id, user_id, last_read_message_id) VALUES (?, ?, ?)",
+        "(conversation_id, user_id, last_read_message_id, status, role) "
+        "VALUES (?, ?, ?, 'accepted', 'member')",
         (GLOBAL_CONVERSATION_ID, uid, max_id)
     )
 
@@ -446,7 +600,7 @@ async def _peer_for(db: aiosqlite.Connection, cid: int, uid: int) -> Optional[di
 async def _dm_number(db: aiosqlite.Connection, cid: int) -> int:
     cursor = await db.execute(
         """SELECT id FROM conversations
-           WHERE type = 'dm' AND user_low_id = (
+           WHERE type = 'dm' AND is_group = 0 AND user_low_id = (
                SELECT user_low_id FROM conversations WHERE id = ?
            ) AND user_high_id = (
                SELECT user_high_id FROM conversations WHERE id = ?
@@ -472,14 +626,34 @@ async def _build_conversation_summary(
         raise HTTPException(404, "Conversation not found")
 
     online_ids = online_ids if online_ids is not None else set()
+    membership = await _membership(db, cid, uid) or {}
+    is_group = bool(conv["is_group"] or 0) if "is_group" in conv.keys() else False
+
+    # Display title: custom rename wins for DMs/groups, otherwise group title
+    # or the name of the other person in a DM.
+    title = conv["title"] or "Chat"
+    custom_name = conv["custom_name"] if "custom_name" in conv.keys() else None
+    dm_number = 1
+    if custom_name:
+        title = custom_name
+
     summary = {
         "id": conv["id"],
         "type": conv["type"],
-        "title": conv["title"] or "Chat",
+        "is_group": is_group,
+        "title": title,
+        "custom_name": custom_name,
         "created_at": conv["created_at"],
         "peer": None,
         "peer_online": False,
-        "dm_number": 1,
+        "dm_number": dm_number,
+        "status": membership.get("status", "accepted"),
+        "role": membership.get("role", "member"),
+        "is_owner": membership.get("role") == "owner",
+        "is_pending": membership.get("status") == "pending",
+        "member_count": 0,
+        "pending_member_count": 0,
+        "members": [],
         "last_message_id": None,
         "last_message_preview": "",
         "last_message_ts": None,
@@ -489,7 +663,24 @@ async def _build_conversation_summary(
         "unread_count": 0,
     }
 
-    if conv["type"] == "dm":
+    members = await _conversation_member_rows(db, cid, include_pending=is_group)
+    summary["member_count"] = sum(1 for m in members if m["status"] == "accepted")
+    summary["pending_member_count"] = sum(1 for m in members if m["status"] == "pending")
+    public_members = []
+    for m in members:
+        public_members.append({
+            "id": m["id"],
+            "username": m["username"],
+            "display_name": m["display_name"],
+            "avatar_path": m["avatar_path"],
+            "online": m["id"] in online_ids,
+            "last_seen": m["last_seen"],
+            "status": m["status"],
+            "role": m["role"],
+        })
+    summary["members"] = public_members
+
+    if not is_group and conv["type"] == "dm":
         peer = await _peer_for(db, cid, uid)
         if peer:
             summary["peer"] = {
@@ -502,6 +693,10 @@ async def _build_conversation_summary(
             }
             summary["peer_online"] = peer["id"] in online_ids
             summary["dm_number"] = await _dm_number(db, cid)
+            if not custom_name:
+                title = peer["display_name"] or peer["username"]
+                summary["title"] = title
+        # If no custom name and no peer (unlikely), keep generic title.
 
     # Newest visible message (encrypted in DB - decrypt only what we preview)
     cursor = await db.execute(
@@ -522,28 +717,36 @@ async def _build_conversation_summary(
         summary["last_sender_name"] = last["display_name"] or last["username"]
         summary["last_message_type"] = last["file_type"] or "text"
 
-    # Unread = messages from other people past the point the user last read to
-    cursor = await db.execute(
-        """SELECT COUNT(*) AS cnt FROM messages m
-           WHERE m.conversation_id = ? AND m.sender_id != ? AND m.is_deleted = 0
-             AND m.id > (SELECT COALESCE(last_read_message_id, 0)
-                         FROM conversation_members
-                         WHERE conversation_id = ? AND user_id = ?)""",
-        (cid, uid, cid, uid)
-    )
-    unread = await cursor.fetchone()
-    summary["unread_count"] = unread["cnt"] or 0
+    # Unread = messages from other people past the point the user last read to.
+    # Pending invites do not count as unread messages.
+    if summary["is_pending"]:
+        summary["unread_count"] = 0
+    else:
+        cursor = await db.execute(
+            """SELECT COUNT(*) AS cnt FROM messages m
+               WHERE m.conversation_id = ? AND m.sender_id != ? AND m.is_deleted = 0
+                 AND m.id > (SELECT COALESCE(last_read_message_id, 0)
+                             FROM conversation_members
+                             WHERE conversation_id = ? AND user_id = ?)""",
+            (cid, uid, cid, uid)
+        )
+        unread = await cursor.fetchone()
+        summary["unread_count"] = unread["cnt"] or 0
     return summary
 
 
 async def _conversations_for_user(db: aiosqlite.Connection, uid: int, online_ids=None) -> List[dict]:
-    """Global lobby first, then the user's private chats newest-activity first."""
+    """Global lobby first, then the user's private chats + groups newest-activity first.
+
+    Pending group invites are included so clients can accept/reject them. Active
+    blocks hide the conversation entirely (but leave the underlying rows intact)."""
     cursor = await db.execute(
         """SELECT c.id FROM conversations c
            WHERE c.id = ?
-              OR (c.type = 'dm' AND EXISTS (
+              OR EXISTS (
                      SELECT 1 FROM conversation_members cm
-                     WHERE cm.conversation_id = c.id AND cm.user_id = ?))
+                     WHERE cm.conversation_id = c.id AND cm.user_id = ?
+                       AND cm.status IN ('accepted', 'pending'))
            ORDER BY c.id""",
         (GLOBAL_CONVERSATION_ID, uid)
     )
@@ -551,6 +754,10 @@ async def _conversations_for_user(db: aiosqlite.Connection, uid: int, online_ids
     summaries = []
     for cid in ids:
         try:
+            # Hide chats when either user has blocked the other; never delete them.
+            if _conversation_blocked is not None and cid != GLOBAL_CONVERSATION_ID \
+                    and await _conversation_blocked(db, cid, uid):
+                continue
             summaries.append(await _build_conversation_summary(db, cid, uid, online_ids))
         except HTTPException:
             continue
@@ -558,6 +765,9 @@ async def _conversations_for_user(db: aiosqlite.Connection, uid: int, online_ids
     def sort_key(s):
         if s["id"] == GLOBAL_CONVERSATION_ID:
             return (0, 0)
+        # Pending invites float to the top so they are easy to accept.
+        if s.get("is_pending"):
+            return (0, 1)
         return (1, -(s["last_message_ts"] or 0))
 
     return sorted(summaries, key=sort_key)
@@ -935,22 +1145,26 @@ async def _create_dm(db: aiosqlite.Connection, uid: int, target_id: int,
     """Create a private chat. Returns summary or None if invalid/at limit.
 
     Up to MAX_PRIVATE_CHATS_PER_PAIR private chats are allowed per pair of users.
+    Blocked users cannot create or be added to a private chat; the global room
+    remains the only shared conversation.
     """
     if target_id == uid:
         raise HTTPException(400, "You can't start a private chat with yourself")
 
     async with _dm_create_lock:
         cursor = await db.execute(
-            "SELECT id, username FROM users WHERE id = ?", (target_id,)
+            "SELECT id, username, display_name FROM users WHERE id = ?", (target_id,)
         )
         target = await cursor.fetchone()
         if not target:
             raise HTTPException(404, "User not found")
+        if await _block_exists(db, uid, target_id):
+            raise HTTPException(403, "You can't start a private chat with this user")
 
         low, high = sorted([uid, target_id])
         cursor = await db.execute(
             """SELECT COUNT(*) AS cnt FROM conversations
-               WHERE type = 'dm' AND user_low_id = ? AND user_high_id = ?""",
+               WHERE type = 'dm' AND is_group = 0 AND user_low_id = ? AND user_high_id = ?""",
             (low, high)
         )
         existing = (await cursor.fetchone())["cnt"]
@@ -963,15 +1177,15 @@ async def _create_dm(db: aiosqlite.Connection, uid: int, target_id: int,
             )
 
         cursor = await db.execute(
-            """INSERT INTO conversations (type, title, created_by, user_low_id, user_high_id)
-               VALUES ('dm', '', ?, ?, ?)""",
+            """INSERT INTO conversations (type, title, created_by, user_low_id, user_high_id, is_group)
+               VALUES ('dm', '', ?, ?, ?, 0)""",
             (uid, low, high)
         )
         cid = cursor.lastrowid
         now = int(time.time())
         await db.executemany(
             "INSERT OR IGNORE INTO conversation_members "
-            "(conversation_id, user_id, joined_at) VALUES (?, ?, ?)",
+            "(conversation_id, user_id, joined_at, status, role) VALUES (?, ?, ?, 'accepted', 'member')",
             [(cid, uid, now), (cid, target_id, now)]
         )
         await db.commit()
@@ -1006,6 +1220,418 @@ async def create_dm_rest(
         await db.close()
 
 
+_group_create_lock = asyncio.Lock()
+_MAX_GROUP_NAME = 60
+
+
+async def _create_group(db: aiosqlite.Connection, creator_id: int, name: str,
+                        member_ids: List[int]) -> dict:
+    if not name or not name.strip():
+        raise HTTPException(400, "Group name is required")
+    name = name.strip()[:_MAX_GROUP_NAME]
+    member_ids = sorted({int(m) for m in member_ids if int(m) != creator_id})
+    if not member_ids:
+        raise HTTPException(400, "Select at least one member")
+    if len(member_ids) > 50:
+        raise HTTPException(400, "A group can have at most 50 members")
+
+    placeholders = ",".join("?" * len(member_ids))
+    cursor = await db.execute(
+        f"SELECT id, username, display_name FROM users WHERE id IN ({placeholders})",
+        member_ids
+    )
+    users = {r["id"]: r for r in await cursor.fetchall()}
+    for mid in member_ids:
+        if mid not in users:
+            raise HTTPException(404, "Could not find a member")
+        if await _block_exists(db, creator_id, mid):
+            raise HTTPException(403, f"You can't include a blocked user: {users[mid]['username']}")
+    for i in range(len(member_ids)):
+        for j in range(i + 1, len(member_ids)):
+            if await _block_exists(db, member_ids[i], member_ids[j]):
+                raise HTTPException(
+                    403,
+                    f"{users[member_ids[i]]['username']} and {users[member_ids[j]]['username']} "
+                    "have a block; they cannot be in the same group"
+                )
+
+    async with _group_create_lock:
+        cursor = await db.execute(
+            """INSERT INTO conversations (type, title, created_by, is_group)
+               VALUES ('dm', ?, ?, 1)""",
+            (name, creator_id)
+        )
+        cid = cursor.lastrowid
+        now = int(time.time())
+        await db.execute(
+            "INSERT INTO conversation_members "
+            "(conversation_id, user_id, joined_at, status, role) VALUES (?, ?, ?, 'accepted', 'owner')",
+            (cid, creator_id, now)
+        )
+        await db.executemany(
+            "INSERT OR IGNORE INTO conversation_members "
+            "(conversation_id, user_id, joined_at, status, role) VALUES (?, ?, ?, 'pending', 'member')",
+            [(cid, mid, now) for mid in member_ids]
+        )
+        await db.commit()
+        schedule_db_sync()
+
+    online = {u["id"] for u in manager.get_online_users()}
+    summary = await _build_conversation_summary(db, cid, creator_id, online)
+
+    # Invitees see a pending conversation so they can accept or decline.
+    for mid in member_ids:
+        invite = await _build_conversation_summary(db, cid, mid, online)
+        await manager.send_to_user(mid, {"type": "conversation_updated", "conversation": invite})
+    return summary
+
+
+@app.post("/api/conversations/group")
+async def create_group_rest(
+    name: str = Query(..., max_length=_MAX_GROUP_NAME),
+    member_ids: str = Query(...),
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    ids = [int(x) for x in member_ids.split(",") if x.strip()]
+    db = await get_db()
+    try:
+        summary = await _create_group(db, user['id'], name, ids)
+        await manager.send_to_user(user['id'], {"type": "dm_created", "conversation": summary})
+        return {"conversation": summary}
+    finally:
+        await db.close()
+
+
+async def _accept_conversation_invite(db: aiosqlite.Connection, uid: int, cid: int) -> dict:
+    member = await _membership(db, cid, uid)
+    if not member or member.get("status") != "pending":
+        raise HTTPException(404, "You don't have a pending invite to this group")
+    if await _conversation_blocked(db, cid, uid):
+        raise HTTPException(403, "This conversation is hidden because of a block")
+    await db.execute(
+        "UPDATE conversation_members SET status = 'accepted' WHERE conversation_id = ? AND user_id = ?",
+        (cid, uid)
+    )
+    await db.commit()
+    schedule_db_sync()
+    return await _build_conversation_summary(db, cid, uid, {u["id"] for u in manager.get_online_users()})
+
+
+async def _reject_conversation_invite(db: aiosqlite.Connection, uid: int, cid: int) -> bool:
+    member = await _membership(db, cid, uid)
+    if not member or member.get("status") != "pending":
+        raise HTTPException(404, "You don't have a pending invite to this group")
+    await db.execute("DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?",
+                     (cid, uid))
+    await db.commit()
+    schedule_db_sync()
+    return True
+
+
+@app.post("/api/conversations/{conversation_id}/accept")
+async def accept_conversation_invite_rest(
+    conversation_id: int,
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        summary = await _accept_conversation_invite(db, user['id'], conversation_id)
+        online = {u["id"] for u in manager.get_online_users()}
+        members = await _group_update_recipient_ids(db, conversation_id)
+        for mid in members:
+            await manager.send_to_user(mid, {"type": "conversation_updated",
+                                             "conversation": await _build_conversation_summary(
+                                                 db, conversation_id, mid, online)})
+        return {"conversation": summary}
+    finally:
+        await db.close()
+
+
+@app.post("/api/conversations/{conversation_id}/reject")
+async def reject_conversation_invite_rest(
+    conversation_id: int,
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        await _reject_conversation_invite(db, user['id'], conversation_id)
+        return {"status": "rejected"}
+    finally:
+        await db.close()
+
+
+@app.post("/api/conversations/{conversation_id}/members")
+async def add_group_members_rest(
+    conversation_id: int,
+    member_ids: str = Query(...),
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        member = await _membership(db, conversation_id, user['id'])
+        conv = await db.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,))
+        row = await conv.fetchone()
+        if not row or not row["is_group"]:
+            raise HTTPException(400, "Only groups can have members added")
+        if not member or member.get("status") != "accepted":
+            raise HTTPException(403, "Accept the group invite first")
+        if not await user_in_conversation(db, user['id'], conversation_id):
+            raise HTTPException(403, "You can no longer access this conversation")
+
+        ids = [int(x) for x in member_ids.split(",") if x.strip()]
+        existing = await _raw_conversation_member_ids(db, conversation_id)
+        new_ids = [mid for mid in ids if mid != user['id']]
+        if len(existing) + len(set(new_ids)) > 50:
+            raise HTTPException(400, "A group can have at most 50 members")
+        now = int(time.time())
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                if await _block_exists(db, ids[i], ids[j]):
+                    raise HTTPException(403, "Selected users have a block between them")
+        for mid in ids:
+            if not mid or mid == user['id']:
+                continue
+            if await _block_exists(db, user['id'], mid):
+                raise HTTPException(403, "You can't add a blocked user")
+            for existing_id in existing:
+                if await _block_exists(db, mid, existing_id):
+                    raise HTTPException(
+                        403, "That user has a block with someone already in this group")
+            await db.execute(
+                "INSERT OR IGNORE INTO conversation_members "
+                "(conversation_id, user_id, joined_at, status, role) VALUES (?, ?, ?, 'pending', 'member')",
+                (conversation_id, mid, now)
+            )
+        await db.commit()
+        schedule_db_sync()
+        online = {u["id"] for u in manager.get_online_users()}
+        summary = await _build_conversation_summary(db, conversation_id, user['id'], online)
+        members = await _group_update_recipient_ids(db, conversation_id)
+        for mid in ids:
+            if mid == user['id'] or await _conversation_blocked(db, conversation_id, mid):
+                continue
+            invite = await _build_conversation_summary(db, conversation_id, mid, online)
+            await manager.send_to_user(mid, {"type": "conversation_updated", "conversation": invite})
+        for mid in members:
+            await manager.send_to_user(mid, {"type": "conversation_updated",
+                                             "conversation": await _build_conversation_summary(
+                                                 db, conversation_id, mid, online)})
+        return {"conversation": summary}
+    finally:
+        await db.close()
+
+
+@app.patch("/api/conversations/{conversation_id}")
+async def rename_conversation_rest(
+    conversation_id: int,
+    name: str = Query(..., max_length=_MAX_GROUP_NAME),
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    name = name.strip()
+    if not name:
+        raise HTTPException(400, "Name cannot be empty")
+    db = await get_db()
+    try:
+        if not await user_in_conversation(db, user['id'], conversation_id):
+            raise HTTPException(403, "You can't rename this conversation")
+        await db.execute(
+            "UPDATE conversations SET custom_name = ?, title = ? WHERE id = ?",
+            (name, name, conversation_id)
+        )
+        await db.commit()
+        schedule_db_sync()
+        online = {u["id"] for u in manager.get_online_users()}
+        summary = await _build_conversation_summary(db, conversation_id, user['id'], online)
+        members = await _group_update_recipient_ids(db, conversation_id)
+        for mid in members:
+            await manager.send_to_user(mid, {"type": "conversation_updated",
+                                             "conversation": await _build_conversation_summary(
+                                                 db, conversation_id, mid, online)})
+        return {"conversation": summary}
+    finally:
+        await db.close()
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_or_leave_conversation_rest(
+    conversation_id: int,
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        member = await _membership(db, conversation_id, user['id'])
+        cursor = await db.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,))
+        conv = await cursor.fetchone()
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+        if conv["is_group"] != 1:
+            raise HTTPException(400, "Only group chats can be left or deleted")
+        if not member or member.get("status") != "accepted":
+            raise HTTPException(403, "You are not a member of this group")
+
+        notify_ids = await _group_update_recipient_ids(db, conversation_id)
+        # Owner deletes the group permanently; members leave the group.
+        if member and member.get("role") == "owner" and member.get("status") == "accepted":
+            await db.execute("DELETE FROM read_receipts WHERE message_id IN "
+                             "(SELECT id FROM messages WHERE conversation_id = ?)", (conversation_id,))
+            await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+            await db.execute("DELETE FROM conversation_members WHERE conversation_id = ?", (conversation_id,))
+            await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            await db.commit()
+            schedule_db_sync()
+            for mid in notify_ids:
+                await manager.send_to_user(mid, {"type": "conversation_deleted",
+                                                 "conversation_id": conversation_id})
+            return {"status": "deleted", "conversation_id": conversation_id}
+
+        # Non-owner: leave (removes membership, keeps the group + history).
+        await db.execute("DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?",
+                         (conversation_id, user['id']))
+        await db.commit()
+        schedule_db_sync()
+        # Only notify the members who remain in the group.
+        remaining = await conversation_member_ids(db, conversation_id)
+        for mid in remaining:
+            await manager.send_to_user(mid, {"type": "conversation_left",
+                                             "conversation_id": conversation_id,
+                                             "user_id": user['id'],
+                                             "conversation": await _build_conversation_summary(
+                                                 db, conversation_id, mid,
+                                                 {u["id"] for u in manager.get_online_users()})})
+        return {"status": "left", "conversation_id": conversation_id}
+    finally:
+        await db.close()
+
+
+# ------------------------------------------------------------------------
+# Users: search + blocking
+# ------------------------------------------------------------------------
+@app.get("/api/users")
+async def list_users(
+    query: str = Query("", max_length=100),
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    q = query.strip().lower()
+    db = await get_db()
+    try:
+        if q:
+            cursor = await db.execute(
+                """SELECT id, username, display_name, avatar_path, status
+                   FROM users WHERE id != ? AND (lower(username) LIKE ? OR lower(display_name) LIKE ?)
+                   ORDER BY CASE WHEN status = 'online' THEN 0 ELSE 1 END, username LIMIT 100""",
+                (user['id'], f"%{q}%", f"%{q}%")
+            )
+        else:
+            cursor = await db.execute(
+                """SELECT id, username, display_name, avatar_path, status FROM users
+                   WHERE id != ? ORDER BY CASE WHEN status = 'online' THEN 0 ELSE 1 END, username LIMIT 100""",
+                (user['id'],)
+            )
+        out = []
+        for r in await cursor.fetchall():
+            out.append({
+                "id": r["id"],
+                "username": r["username"],
+                "display_name": r["display_name"],
+                "avatar_path": r["avatar_path"],
+                "online": r["status"] == "online" and manager.is_online(r["id"]),
+                "blocked": await _block_exists(db, user['id'], r["id"]),
+            })
+        return {"users": out}
+    finally:
+        await db.close()
+
+
+@app.get("/api/users/blocked")
+async def blocked_users(token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            """SELECT u.id, u.username, u.display_name, u.avatar_path, b.created_at
+               FROM user_blocks b JOIN users u ON u.id = b.blocked_id
+               WHERE b.blocker_id = ? ORDER BY b.created_at DESC""",
+            (user['id'],)
+        )
+        return {"users": [dict(r) for r in await cursor.fetchall()]}
+    finally:
+        await db.close()
+
+
+@app.post("/api/users/{user_id}/block")
+async def block_user_rest(user_id: int, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    if user_id == user['id']:
+        raise HTTPException(400, "You can't block yourself")
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+        if not await cursor.fetchone():
+            raise HTTPException(404, "User not found")
+        await db.execute(
+            "INSERT OR IGNORE INTO user_blocks (blocker_id, blocked_id) VALUES (?, ?)",
+            (user['id'], user_id)
+        )
+        await db.commit()
+        schedule_db_sync()
+        await manager.send_to_user(user_id, {
+            "type": "block_changed",
+            "blocker_id": user['id'],
+            "blocked": True,
+        })
+        return {"status": "blocked", "user_id": user_id}
+    finally:
+        await db.close()
+
+
+@app.delete("/api/users/{user_id}/block")
+async def unblock_user_rest(user_id: int, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        await db.execute(
+            "DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?",
+            (user['id'], user_id)
+        )
+        await db.commit()
+        schedule_db_sync()
+        await manager.send_to_user(user_id, {
+            "type": "block_changed",
+            "blocker_id": user['id'],
+            "blocked": False,
+        })
+        return {"status": "unblocked", "user_id": user_id}
+    finally:
+        await db.close()
+
+
 # ------------------------------------------------------------------------
 # Messages (REST fallbacks for reliable edit/delete/receipts)
 # ------------------------------------------------------------------------
@@ -1036,6 +1662,8 @@ async def edit_message_rest(
         row = await _get_message_row(db, message_id)
         if not row or row["sender_id"] != user['id'] or row["is_deleted"]:
             raise HTTPException(404, "Message not found")
+        if not await user_in_conversation(db, user['id'], row["conversation_id"]):
+            raise HTTPException(403, "You can no longer access this conversation")
         new_enc = encrypt_message(content)
         await db.execute(
             "UPDATE messages SET encrypted_content = ?, is_edited = 1 WHERE id = ?",
@@ -1069,8 +1697,15 @@ async def delete_message_rest(
     db = await get_db()
     try:
         row = await _get_message_row(db, message_id)
-        if not row or row["sender_id"] != user['id'] or row["is_deleted"]:
+        if not row:
+            # Idempotent: an already-removed message should not make the
+            # client keep showing "delete failed" when a resend/reconnect
+            # replays the request.
+            return {"status": "already_deleted", "message_id": message_id}
+        if row["sender_id"] != user['id'] or row["is_deleted"]:
             raise HTTPException(404, "Message not found")
+        if not await user_in_conversation(db, user['id'], row["conversation_id"]):
+            raise HTTPException(403, "You can no longer access this conversation")
 
         if row["file_path"]:
             try:
@@ -1294,6 +1929,23 @@ async def download_file(
         raise HTTPException(401)
     if '..' in file_path or '\\' in file_path:
         raise HTTPException(400, "Invalid path")
+
+    # Avatars are public profile data. Chat files belong to a conversation, so
+    # a user blocked out of it must not be able to keep downloading the files.
+    if not file_path.startswith("avatars/"):
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT conversation_id FROM messages WHERE file_path = ? ORDER BY id DESC LIMIT 1",
+                (file_path,)
+            )
+            row = await cursor.fetchone()
+            if not row:
+                raise HTTPException(404, "File not found")
+            if not await user_in_conversation(db, user['id'], row["conversation_id"]):
+                raise HTTPException(403, "You can no longer access this file")
+        finally:
+            await db.close()
 
     try:
         # AES-GCM needs the whole ciphertext to verify its auth tag, so one full

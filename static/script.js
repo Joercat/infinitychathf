@@ -53,6 +53,8 @@
         typingUsers: new Map(),           // convId -> {userId -> {name, timer}}
         typingSentAt: 0,
         onlineUsers: new Map(),
+        blockedUserIds: new Set(),        // users this account has blocked
+        hiddenUserIds: new Set(),         // users hiding chats in either block direction
         isAtBottom: true,
         latestUnseen: null,
         unreadTotal: 0,
@@ -115,6 +117,16 @@
         confirmModal: $('confirm-modal'), lightboxModal: $('lightbox-modal'),
         emojiPicker: $('emoji-picker'), emojiGrid: $('emoji-grid'),
 
+        groupBtn: $('group-btn'), groupModal: $('group-modal'),
+        groupNameInput: $('group-name-input'), groupUserSearch: $('group-user-search'),
+        groupUserResults: $('group-user-results'), groupSelectedList: $('group-selected-list'),
+        createGroupBtn: $('create-group-btn'),
+        convOptionsBtn: $('conv-options-btn'), convOptionsModal: $('conv-options-modal'),
+        convOptionsTitle: $('conv-options-title'),
+        renameConvBtn: $('rename-conv-btn'), addGroupMembersBtn: $('add-group-members-btn'),
+        blockConvUserBtn: $('block-conv-user-btn'), leaveConvBtn: $('leave-conv-btn'),
+        refreshBlocksBtn: $('refresh-blocks-btn'), blockedUsersList: $('blocked-users-list'),
+
         settingsDisplayName: $('settings-display-name'), settingsUsername: $('settings-username'),
         settingsAvatarPreview: $('settings-avatar-preview'), settingsAvatarImg: $('settings-avatar-img'),
         avatarInput: $('avatar-input'), avatarUploadBtn: $('avatar-upload-btn'),
@@ -151,6 +163,14 @@
     function truncate(str, n) {
         if (!str) return '';
         return str.length > n ? str.substr(0, n - 1) + '…' : str;
+    }
+
+    function debounce(fn, ms) {
+        let t = null;
+        return function (...args) {
+            clearTimeout(t);
+            t = setTimeout(() => fn.apply(this, args), ms);
+        };
     }
 
     function escapeHtml(text) {
@@ -571,16 +591,23 @@
     // ============================================================
     function convById(id) { return State.conversations.get(id); }
 
+    function conversationTouchesBlocked(summary) {
+        if (!summary || summary.id === GLOBAL_CONV) return false;
+        if (summary.type === 'dm' && summary.peer && State.hiddenUserIds.has(summary.peer.id)) return true;
+        if (Array.isArray(summary.members) && summary.members.some(m => State.hiddenUserIds.has(m.id))) return true;
+        return false;
+    }
+
     function upsertConversation(summary) {
+        if (conversationTouchesBlocked(summary)) {
+            State.conversations.delete(summary.id);
+            return;
+        }
         State.conversations.set(summary.id, summary);
         if (!State.convCache.has(summary.id)) {
             State.convCache.set(summary.id, { ids: [], cursor: null, hasMore: true, lastTs: 0 });
         }
         renderSidebar();
-    }
-
-    function deleteConversationLocally(id) {
-        // reserved: DM deletion UI may land in a later version
     }
 
     function convSortKey(c) {
@@ -610,9 +637,18 @@
         }
         DOM.convList.innerHTML = html;
         DOM.convList.querySelectorAll('.conv-item').forEach((el) => {
-            el.addEventListener('click', () => {
+            el.addEventListener('click', (e) => {
+                if (e.target.closest('[data-invite]')) return;
                 switchConversation(parseInt(el.dataset.id, 10));
                 closeSidebar();
+            });
+        });
+        DOM.convList.querySelectorAll('[data-invite]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const item = btn.closest('.conv-item');
+                const cid = parseInt(item.dataset.id, 10);
+                const action = btn.dataset.invite;
+                await respondToInvite(cid, action);
             });
         });
         State.unreadTotal = unreadTotal;
@@ -626,31 +662,39 @@
 
     function convItemHTML(c) {
         const isDm = c.type === 'dm';
-        const name = isDm ? dmLabel(c) : (c.title || 'Global Chat');
+        const isGroup = !!c.is_group;
+        const name = isGroup ? (c.custom_name || c.title || 'Group Chat') : (isDm ? dmLabel(c) : (c.title || 'Global Chat'));
         const active = c.id === State.activeConvId ? ' active' : '';
         const time = c.last_message_ts ? formatTime(c.last_message_ts) : '';
         const unread = Math.min(c.unread_count || 0, 99);
         const unreadHtml = unread > 0
             ? `<span class="conv-badge">${unread}</span>`
             : '';
+        const pending = c.is_pending ? '<span class="conv-pending">Invite</span>' : '';
         const timeCls = unread > 0 ? ' unread' : '';
+        const pendingCls = c.is_pending ? ' pending' : '';
         let avatar = avatarHTML(c, 44);
-        return `<button class="conv-item${active}" data-id="${c.id}" title="${escapeHtml(name)}">
+        return `<div class="conv-item${active}${pendingCls}" data-id="${c.id}" title="${escapeHtml(name)}" role="button" tabindex="0">
             ${avatar}
             <div class="conv-info">
                 <div class="conv-top">
                     <span class="conv-name">${escapeHtml(name)}</span>
+                    ${pending}
+                </div>
+                <div class="conv-top">
                     <span class="conv-time${timeCls}">${escapeHtml(time)}</span>
+                    ${unreadHtml}
                 </div>
                 <div class="conv-bottom">
                     <span class="conv-preview">${previewHTML(c)}</span>
-                    ${unreadHtml}
                 </div>
+                ${pending ? '<div class="conv-pending-actions"><button class="btn btn-primary btn-sm" data-invite="accept">Accept</button><button class="btn btn-secondary btn-sm" data-invite="reject">Reject</button></div>' : ''}
             </div>
-        </button>`;
+        </div>`;
     }
 
     function dmLabel(c) {
+        if (c.custom_name) return c.custom_name;
         const base = displayNameOf(c.peer);
         return c.dm_number && c.dm_number > 1 ? `${base} · ${c.dm_number}` : base;
     }
@@ -665,6 +709,9 @@
     }
 
     function avatarHTML(c, px) {
+        if (c.is_group) {
+            return `<div class="conv-avatar avatar-c2" style="width:${px}px;height:${px}px;font-size:${Math.round(px * 0.4)}px"><i class="fas fa-users"></i></div>`;
+        }
         if (c.type === 'dm' && c.peer) {
             const on = c.peer.online ? ' online' : '';
             let inner = `<span class="conv-presence${on}"></span>`;
@@ -749,8 +796,9 @@
         if (!conv) return;
         const dm = conv.type === 'dm';
         const peer = conv.peer;
+        const isGroup = !!conv.is_group;
 
-        if (dm && peer) {
+        if (dm && peer && !isGroup) {
             DOM.convTitle.textContent = dmLabel(conv);
             if (peer.avatar_path) {
                 DOM.convAvatar.src = fileUrl(peer.avatar_path);
@@ -769,6 +817,21 @@
                 ? '<span class="status-dot online"></span> Online'
                 : escapeHtml(formatLastSeen(peer.last_seen));
             DOM.onlineBtn.style.display = '';
+            DOM.convAvatarPh.style.display = '';
+            DOM.convAvatar.style.display = '';
+        } else if (isGroup) {
+            DOM.convTitle.textContent = conv.custom_name || conv.title || 'Group Chat';
+            const gm = conv.members && conv.members.length ? conv.members.filter(m => m.status === 'accepted') : [];
+            const onlineCount = gm.filter(m => m.online && m.id !== State.user?.id).length;
+            DOM.convAvatar.classList.add('hidden');
+            DOM.convAvatarPh.classList.remove('hidden');
+            DOM.convAvatarPh.className = 'conv-avatar-ph avatar-c2';
+            DOM.convAvatarPh.innerHTML = '<i class="fas fa-users"></i>';
+            DOM.convPresenceDot.classList.add('hidden');
+            const pending = conv.is_pending ? ' — invite pending' : '';
+            const label = `${gm.length} member${gm.length === 1 ? '' : 's'} · ${onlineCount} online${pending}`;
+            DOM.convSubtitle.innerHTML = `<span class="status-dot ${conv.is_pending ? 'warn' : 'online'}"></span> ${escapeHtml(label)}`;
+            DOM.onlineBtn.style.display = '';
         } else {
             DOM.convTitle.textContent = 'Global Chat';
             DOM.convAvatar.classList.add('hidden');
@@ -776,10 +839,11 @@
             DOM.convAvatarPh.className = 'conv-avatar-ph';
             DOM.convAvatarPh.innerHTML = '<i class="fas fa-globe"></i>';
             DOM.convPresenceDot.classList.add('hidden');
-            const meCount = onlineCountExcludingSelf();
+            const meCount = onlineCount();
             DOM.convSubtitle.innerHTML = `<span class="status-dot online"></span> ${meCount} online`;
             DOM.onlineBtn.style.display = '';
         }
+        DOM.convOptionsBtn.style.display = convId === GLOBAL_CONV ? 'none' : '';
     }
 
     function openSidebar() {
@@ -919,6 +983,7 @@
                 updateSidebarMe();
                 updateOnlineBadge();
                 updateAllPeerPresence();
+                loadBlockedUsers();
                 if (!DOM.onlineModal.classList.contains('hidden')) renderOnlineUsers();
 
                 // fresh session: adopt server conversation list, drop old caches
@@ -954,6 +1019,48 @@
                     renderConversationHeader(State.activeConvId);
                 }
                 break;
+
+            case 'conversation_deleted': {
+                const cid = msg.conversation_id;
+                State.conversations.delete(cid);
+                State.convCache.delete(cid);
+                State.messages.forEach(m => { if (m.conversation_id === cid) State.messages.delete(m.id); });
+                if (State.activeConvId === cid) switchConversation(GLOBAL_CONV);
+                renderSidebar();
+                showToast('A group chat was deleted', 'info');
+                break;
+            }
+
+            case 'conversation_left': {
+                const cid = msg.conversation_id;
+                if (msg.user_id === State.user?.id) {
+                    State.conversations.delete(cid);
+                    State.convCache.delete(cid);
+                    if (State.activeConvId === cid) switchConversation(GLOBAL_CONV);
+                } else if (msg.conversation) {
+                    upsertConversation(msg.conversation);
+                }
+                renderSidebar();
+                break;
+            }
+
+            case 'block_changed': {
+                // A block hides all non-global conversations with that person on
+                // both sides (rows stay in the database). On unblock the hidden
+                // chats reappear after a refresh.
+                if (msg.blocked) {
+                    State.hiddenUserIds.add(msg.blocker_id);
+                    hideConversationsWithUser(msg.blocker_id);
+                    renderSidebar();
+                    showToast('Conversations with this person are now hidden', 'info');
+                } else {
+                    // Removing the hidden mark is safe: the server still enforces
+                    // any block that remains in the other direction.
+                    State.hiddenUserIds.delete(msg.blocker_id);
+                    requestConversations();
+                }
+                break;
+            }
 
             case 'dm_created': {
                 upsertConversation(msg.conversation);
@@ -1173,6 +1280,25 @@
                 if ('avatar_path' in user) c.peer.avatar_path = user.avatar_path;
             }
         });
+    }
+
+    function hideConversationsWithUser(userId) {
+        if (!userId) return;
+        const activeWasHidden = State.conversations.has(State.activeConvId) &&
+            State.activeConvId !== GLOBAL_CONV &&
+            (() => {
+                const c = State.conversations.get(State.activeConvId);
+                if (!c) return false;
+                return (c.type === 'dm' && c.peer && c.peer.id === userId) ||
+                       (Array.isArray(c.members) && c.members.some(m => m.id === userId));
+            })();
+        State.conversations.forEach((c, cid) => {
+            if (cid === GLOBAL_CONV) return;
+            const isDm = c.type === 'dm' && c.peer && c.peer.id === userId;
+            const isGroup = Array.isArray(c.members) && c.members.some(m => m.id === userId);
+            if (isDm || isGroup) State.conversations.delete(cid);
+        });
+        if (activeWasHidden && State.activeConvId !== GLOBAL_CONV) switchConversation(GLOBAL_CONV);
     }
 
     function updatePeerPresence(userId, online) {
@@ -1941,6 +2067,8 @@
         const content = DOM.messageInput.value.trim();
         if (!content && !State.pendingFile) return;
         if (!State.activeConvId) { showToast('No conversation selected', 'warning'); return; }
+        const active = convById(State.activeConvId);
+        if (active && active.is_pending) { showToast('Accept the group invite first', 'warning'); return; }
         if (!wsOpen()) {
             showToast('Not connected - message queued, sending when reconnected', 'warning');
         }
@@ -2299,27 +2427,26 @@
         if (wsOpen()) wsSend({ type: 'get_online_users' });
     }
 
-    function onlineCountExcludingSelf() {
-        const hasSelf = State.onlineUsers.has(State.user?.id);
-        return hasSelf ? Math.max(0, State.onlineUsers.size - 1) : State.onlineUsers.size;
+    function onlineCount() {
+        return State.onlineUsers.size;
     }
 
     function updateOnlineBadge() {
-        const count = onlineCountExcludingSelf();
+        const count = onlineCount();
         DOM.onlineBadge.textContent = count;
         DOM.onlineBadge.classList.toggle('hidden', count === 0);
     }
 
     function renderOnlineUsers() {
         DOM.onlineUsersList.innerHTML = '';
-        const count = onlineCountExcludingSelf();
+        const count = onlineCount();
         if (count === 0) {
             DOM.onlineUsersList.innerHTML = '<div class="loading-state"><span>No users online</span></div>';
             DOM.onlineTotal.textContent = '0 users online';
             return;
         }
         State.onlineUsers.forEach(u => {
-            if (u.id === State.user?.id) return; // don't list yourself
+            const me = u.id === State.user?.id;
             const div = document.createElement('div');
             div.className = 'user-item';
             const av = u.avatar_path
@@ -2328,12 +2455,324 @@
             div.innerHTML = `
                 <div class="user-avatar">${av}</div>
                 <div class="user-info">
-                    <div class="user-name">${escapeHtml(displayNameOf(u))}</div>
+                    <div class="user-name">${escapeHtml(me ? 'You' : displayNameOf(u))}</div>
                     <div class="user-status-text"><span class="status-dot online"></span> Online</div>
                 </div>`;
             DOM.onlineUsersList.appendChild(div);
         });
         DOM.onlineTotal.textContent = `${count} user${count === 1 ? '' : 's'} online`;
+    }
+
+    // ============================================================
+    // Group chats, invites, conversation options and blocking
+    // ============================================================
+    const groupSelected = new Set();
+    let groupUsersCache = [];
+
+    async function apiGet(url) {
+        const res = await fetch(`${API}${url}`, { headers: { 'X-Auth-Token': State.token } });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
+        return data;
+    }
+
+    async function apiPost(url, body) {
+        const res = await fetch(`${API}${url}`, {
+            method: 'POST',
+            headers: { 'X-Auth-Token': State.token },
+            body
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
+        return data;
+    }
+
+    async function apiPatch(url) {
+        const res = await fetch(`${API}${url}`, {
+            method: 'PATCH', headers: { 'X-Auth-Token': State.token }
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
+        return data;
+    }
+
+    async function apiDelete(url) {
+        const res = await fetch(`${API}${url}`, {
+            method: 'DELETE', headers: { 'X-Auth-Token': State.token }
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
+        return data;
+    }
+
+    async function respondToInvite(cid, action) {
+        try {
+            const path = action === 'accept' ? `accept` : `reject`;
+            const res = await fetch(`${API}/api/conversations/${cid}/${path}`, {
+                method: 'POST', headers: { 'X-Auth-Token': State.token }
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Could not update invite');
+            if (action === 'accept') {
+                upsertConversation(data.conversation);
+                switchConversation(cid);
+                showToast('Group invite accepted', 'success');
+            } else {
+                State.conversations.delete(cid);
+                State.convCache.delete(cid);
+                renderSidebar();
+                showToast('Group invite rejected', 'info');
+            }
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    }
+
+    function renderGroupUserResults(list) {
+        if (!list || !list.length) {
+            DOM.groupUserResults.innerHTML = '<div class="conv-modal-empty">No results</div>';
+            return;
+        }
+        DOM.groupUserResults.innerHTML = '';
+        list.forEach(u => {
+            if (u.id === State.user?.id) return;
+            const selected = groupSelected.has(u.id);
+            const div = document.createElement('div');
+            div.className = 'conv-modal-item group-user-item' + (selected ? ' selected' : '');
+            div.dataset.uid = u.id;
+            const av = u.avatar_path
+                ? `<img src="${fileUrl(u.avatar_path)}" alt="" style="width:36px;height:36px;border-radius:50%;object-fit:cover">`
+                : `<span style="font-weight:600;font-size:1.1rem">${initialOf(displayNameOf(u))}</span>`;
+            div.innerHTML = `
+                <div class="user-avatar">${av}</div>
+                <div class="mi-info">
+                    <div class="mi-name">${escapeHtml(displayNameOf(u))}</div>
+                    <div class="mi-preview">${escapeHtml(u.username)}${u.online ? ' · online' : ''}${u.blocked ? ' · blocked' : ''}</div>
+                </div>
+                <i class="fas ${selected ? 'fa-check-circle' : 'fa-plus-circle'} mi-open"></i>`;
+            div.addEventListener('click', () => {
+                if (u.blocked) { showToast('You have blocked this user', 'warning'); return; }
+                if (groupSelected.has(u.id)) groupSelected.delete(u.id);
+                else groupSelected.add(u.id);
+                renderGroupUserResults(list);
+                renderGroupSelected();
+            });
+            DOM.groupUserResults.appendChild(div);
+        });
+    }
+
+    function renderGroupSelected() {
+        const people = groupUsersCache.filter(u => groupSelected.has(u.id));
+        if (!people.length) {
+            DOM.groupSelectedList.innerHTML = '';
+            return;
+        }
+        DOM.groupSelectedList.innerHTML = people.map(u =>
+            `<span class="group-chip">${escapeHtml(displayNameOf(u))}<button class="btn-icon btn-icon-sm" data-remove-group="${u.id}" title="Remove"><i class="fas fa-times"></i></button></span>`
+        ).join('');
+        DOM.groupSelectedList.querySelectorAll('[data-remove-group]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                groupSelected.delete(parseInt(btn.dataset.removeGroup, 10));
+                renderGroupSelected();
+                renderGroupUserResults(groupUsersCache);
+            });
+        });
+    }
+
+    async function loadGroupUsers(query = '') {
+        try {
+            const data = await apiGet(`/api/users?query=${encodeURIComponent(query)}`);
+            groupUsersCache = data.users || [];
+            renderGroupUserResults(groupUsersCache);
+            renderGroupSelected();
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    }
+
+    function openGroupModal() {
+        groupSelected.clear();
+        DOM.groupNameInput.value = '';
+        DOM.groupNameInput.hidden = false;
+        DOM.groupNameInput.closest('.form-group').hidden = false;
+        DOM.groupUserSearch.value = '';
+        DOM.groupUserSearch.placeholder = 'Search by name…';
+        DOM.createGroupBtn.dataset.mode = 'create';
+        DOM.createGroupBtn.innerHTML = '<i class="fas fa-plus"></i> Create Group';
+        loadGroupUsers();
+        openModal(DOM.groupModal);
+    }
+
+    DOM.groupBtn.addEventListener('click', openGroupModal);
+    DOM.groupUserSearch.addEventListener('input', debounce(() => {
+        loadGroupUsers(DOM.groupUserSearch.value.trim());
+    }, 250));
+
+    DOM.createGroupBtn.addEventListener('click', async () => {
+        const mode = DOM.createGroupBtn.dataset.mode || 'create';
+        if (mode === 'add-members') {
+            const cid = parseInt(DOM.groupModal.dataset.groupId, 10);
+            const ids = [...groupSelected].join(',');
+            if (!ids) { showToast('Select people to add', 'warning'); return; }
+            DOM.createGroupBtn.disabled = true;
+            try {
+                await apiPost(`/api/conversations/${cid}/members?member_ids=${encodeURIComponent(ids)}`);
+                closeModal(DOM.groupModal);
+                const data = await apiGet('/api/conversations');
+                data.conversations.forEach(c => upsertConversation(c));
+                if (State.activeConvId === cid) renderConversationHeader(cid);
+                showToast('Invites sent', 'success');
+            } catch (err) {
+                showToast(err.message, 'error');
+            } finally {
+                DOM.createGroupBtn.disabled = false;
+            }
+            return;
+        }
+
+        const name = DOM.groupNameInput.value.trim();
+        if (!name) { showToast('Enter a group name', 'warning'); return; }
+        if (!groupSelected.size) { showToast('Select at least one person', 'warning'); return; }
+        DOM.createGroupBtn.disabled = true;
+        DOM.createGroupBtn.innerHTML = '<div class="spinner spinner-sm"></div> Creating…';
+        try {
+            const ids = [...groupSelected].join(',');
+            const data = await apiPost(`/api/conversations/group?name=${encodeURIComponent(name)}&member_ids=${encodeURIComponent(ids)}`);
+            upsertConversation(data.conversation);
+            closeModal(DOM.groupModal);
+            switchConversation(data.conversation.id);
+            showToast('Group created and people invited', 'success');
+        } catch (err) {
+            showToast(err.message, 'error');
+        } finally {
+            DOM.createGroupBtn.disabled = false;
+            DOM.createGroupBtn.innerHTML = '<i class="fas fa-plus"></i> Create Group';
+        }
+    });
+
+    function openConvOptions() {
+        const conv = convById(State.activeConvId);
+        if (!conv || State.activeConvId === GLOBAL_CONV) return;
+        const pending = !!conv.is_pending;
+        DOM.renameConvBtn.style.display = pending ? 'none' : '';
+        DOM.addGroupMembersBtn.style.display = conv.is_group && !pending ? '' : 'none';
+        DOM.blockConvUserBtn.style.display = (!conv.is_group && conv.peer) ? '' : 'none';
+        DOM.leaveConvBtn.style.display = (conv.is_group && !pending) ? '' : 'none';
+        DOM.convOptionsTitle.innerHTML = `<i class="fas fa-ellipsis-h"></i> ${escapeHtml(conv.custom_name || conv.title || 'Chat Options')}`;
+        openModal(DOM.convOptionsModal);
+    }
+
+    DOM.convOptionsBtn.addEventListener('click', openConvOptions);
+
+    DOM.renameConvBtn.addEventListener('click', async () => {
+        const conv = convById(State.activeConvId);
+        if (!conv) return;
+        const name = prompt('Rename this chat (everyone in the chat sees it):', conv.custom_name || conv.title || '');
+        if (!name || !name.trim()) return;
+        closeModal(DOM.convOptionsModal);
+        try {
+            const data = await apiPatch(`/api/conversations/${conv.id}?name=${encodeURIComponent(name.trim())}`);
+            upsertConversation(data.conversation);
+            renderConversationHeader(State.activeConvId);
+            showToast('Chat renamed', 'success');
+        } catch (err) { showToast(err.message, 'error'); }
+    });
+
+    DOM.addGroupMembersBtn.addEventListener('click', async () => {
+        const conv = convById(State.activeConvId);
+        closeModal(DOM.convOptionsModal);
+        if (!conv || !conv.is_group) return;
+        groupSelected.clear();
+        DOM.groupNameInput.value = '';
+        DOM.groupNameInput.hidden = true;
+        DOM.groupNameInput.closest('.form-group').hidden = true;
+        DOM.groupUserSearch.value = '';
+        DOM.groupUserSearch.placeholder = 'Add more people…';
+        DOM.createGroupBtn.innerHTML = '<i class="fas fa-user-plus"></i> Add Members';
+        DOM.createGroupBtn.dataset.mode = 'add-members';
+        DOM.groupModal.dataset.groupId = conv.id;
+        loadGroupUsers();
+        openModal(DOM.groupModal);
+    });
+
+    DOM.blockConvUserBtn.addEventListener('click', async () => {
+        const conv = convById(State.activeConvId);
+        closeModal(DOM.convOptionsModal);
+        if (!conv || !conv.peer) return;
+        if (!await showConfirm({
+            title: 'Block person',
+            message: `Block ${displayNameOf(conv.peer)}? They cannot message or add you to private/group chats, and all chats with them will be hidden until you unblock them. You can still talk in Global Chat.`,
+            okText: 'Block'
+        })) return;
+        try {
+            await apiPost(`/api/users/${conv.peer.id}/block`);
+            State.blockedUserIds.add(conv.peer.id);
+            State.hiddenUserIds.add(conv.peer.id);
+            hideConversationsWithUser(conv.peer.id);
+            renderSidebar();
+            showToast('User blocked', 'success');
+            requestConversations();
+        } catch (err) { showToast(err.message, 'error'); }
+    });
+
+    DOM.leaveConvBtn.addEventListener('click', async () => {
+        const conv = convById(State.activeConvId);
+        closeModal(DOM.convOptionsModal);
+        if (!conv || !conv.is_group) return;
+        const isOwner = conv.is_owner;
+        const ok = await showConfirm({
+            title: isOwner ? 'Delete group' : 'Leave group',
+            message: isOwner
+                ? 'This permanently deletes the group and its messages for everyone. This cannot be undone.'
+                : 'Leave this group? You can be added again later if a member invites you.',
+            okText: isOwner ? 'Delete Group' : 'Leave Group'
+        });
+        if (!ok) return;
+        try {
+            await apiDelete(`/api/conversations/${conv.id}`);
+            State.conversations.delete(conv.id);
+            State.convCache.delete(conv.id);
+            if (State.activeConvId === conv.id) switchConversation(GLOBAL_CONV);
+            renderSidebar();
+            showToast(isOwner ? 'Group deleted' : 'Left group', 'success');
+        } catch (err) { showToast(err.message, 'error'); }
+    });
+
+    DOM.refreshBlocksBtn.addEventListener('click', loadBlockedUsers);
+
+    async function loadBlockedUsers() {
+        try {
+            const data = await apiGet('/api/users/blocked');
+            const users = data.users || [];
+            State.blockedUserIds.clear();
+            users.forEach(u => State.blockedUserIds.add(u.id));
+            State.hiddenUserIds = new Set(State.blockedUserIds);
+            if (!users.length) {
+                DOM.blockedUsersList.innerHTML = '<div class="text-secondary">Nobody is blocked.</div>';
+                return;
+            }
+            DOM.blockedUsersList.innerHTML = users.map(u =>
+                `<div class="blocked-user-row">
+                    <div class="user-avatar">${u.avatar_path ? `<img src="${fileUrl(u.avatar_path)}" alt="">` : `<span>${initialOf(displayNameOf(u))}</span>`}</div>
+                    <div class="user-info"><div class="user-name">${escapeHtml(displayNameOf(u))}</div><div class="user-status-text">${escapeHtml(u.username)}</div></div>
+                    <button class="btn btn-secondary btn-sm" data-unblock="${u.id}">Unblock</button>
+                </div>`).join('');
+            DOM.blockedUsersList.querySelectorAll('[data-unblock]').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    try {
+                        await apiDelete(`/api/users/${btn.dataset.unblock}/block`);
+                        const unblockedId = parseInt(btn.dataset.unblock, 10);
+                        State.blockedUserIds.delete(unblockedId);
+                        State.hiddenUserIds.delete(unblockedId);
+                        showToast('User unblocked', 'success');
+                        loadBlockedUsers();
+                        requestConversations();
+                    } catch (err) { showToast(err.message, 'error'); }
+                });
+            });
+        } catch (err) {
+            DOM.blockedUsersList.innerHTML = `<div class="text-secondary">${escapeHtml(err.message)}</div>`;
+        }
     }
 
     // ============================================================
@@ -2367,6 +2806,7 @@
         }
         DOM.aboutVersion.textContent = APP_VERSION;
         applyPrefs();
+        loadBlockedUsers();
         openModal(DOM.settingsModal);
     }
 
@@ -2579,6 +3019,8 @@
         State.tombstoned.clear();
         State.pendingSends.clear();
         State.onlineUsers.clear();
+        State.blockedUserIds.clear();
+        State.hiddenUserIds.clear();
         State.typingUsers.clear();
         State.activeConvId = null;
         State.cursor = null;
@@ -2586,6 +3028,7 @@
         State.pendingFile = null;
         State.latestUnseen = null;
         State.editingId = null;
+        groupSelected.clear();
         DOM.messagesList.innerHTML = '';
         DOM.convList.innerHTML = '';
         DOM.sidebar.classList.remove('open');
@@ -2601,6 +3044,8 @@
         DOM.sendBtn.disabled = true;
         DOM.uploadProgress.classList.add('hidden');
         DOM.onlineModal.classList.add('hidden');
+        DOM.groupModal.classList.add('hidden');
+        DOM.convOptionsModal.classList.add('hidden');
         DOM.settingsModal.classList.add('hidden');
         DOM.convModal.classList.add('hidden');
         DOM.receiptsModal.classList.add('hidden');

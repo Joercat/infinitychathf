@@ -165,9 +165,15 @@
                         </div>
                     </div>
                     <div class="header-section header-right">
+                        <button id="group-btn" class="btn-icon" aria-label="New group chat" title="New group chat">
+                            <i class="fas fa-people-group"></i>
+                        </button>
                         <button id="online-btn" class="btn-icon" aria-label="Online users" title="Online users">
                             <i class="fas fa-users"></i>
                             <span id="online-badge" class="badge hidden">0</span>
+                        </button>
+                        <button id="conv-options-btn" class="btn-icon" aria-label="Chat options" title="Chat options">
+                            <i class="fas fa-ellipsis-h"></i>
                         </button>
                         <button id="settings-btn" class="btn-icon" aria-label="Settings" title="Settings">
                             <i class="fas fa-cog"></i>
@@ -344,6 +350,14 @@
                         <i class="fas fa-key"></i> Change Password
                     </button>
                     <span id="pw-msg" class="form-hint"></span>
+                </section>
+
+                <section class="settings-section">
+                    <h3>Privacy</h3>
+                    <button id="refresh-blocks-btn" class="btn btn-secondary btn-sm">
+                        <i class="fas fa-ban"></i> Refresh Blocked Users
+                    </button>
+                    <div id="blocked-users-list" class="blocked-users-list"></div>
                 </section>
 
                 <section class="settings-section">
@@ -541,6 +555,70 @@
                 <button class="btn btn-ghost" data-close="conv-modal">Cancel</button>
                 <button id="new-chat-btn" class="btn btn-primary">
                     <i class="fas fa-plus"></i> Start New Chat
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Group creation modal -->
+    <div id="group-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="group-modal"></div>
+        <div class="modal-container modal-md">
+            <div class="modal-header">
+                <h2><i class="fas fa-people-group"></i> New Group Chat</h2>
+                <button class="btn-icon" data-close="group-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="group-name-input">Group name</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="group-name-input" class="form-input" maxlength="60"
+                               placeholder="e.g. Weekend Plans">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="group-user-search">Add people</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="group-user-search" class="form-input"
+                               placeholder="Search by name…">
+                    </div>
+                </div>
+                <div id="group-user-results" class="conv-modal-list"></div>
+                <div id="group-selected-list" class="group-selected-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" data-close="group-modal">Cancel</button>
+                <button id="create-group-btn" class="btn btn-primary">
+                    <i class="fas fa-plus"></i> Create Group
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Conversation options modal -->
+    <div id="conv-options-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="conv-options-modal"></div>
+        <div class="modal-container modal-sm">
+            <div class="modal-header">
+                <h2 id="conv-options-title"><i class="fas fa-ellipsis-h"></i> Chat Options</h2>
+                <button class="btn-icon" data-close="conv-options-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body conv-options-body">
+                <button id="rename-conv-btn" class="btn btn-secondary btn-block">
+                    <i class="fas fa-pen"></i> Rename Chat
+                </button>
+                <button id="add-group-members-btn" class="btn btn-secondary btn-block">
+                    <i class="fas fa-user-plus"></i> Add Members
+                </button>
+                <button id="block-conv-user-btn" class="btn btn-danger btn-block">
+                    <i class="fas fa-ban"></i> Block Person
+                </button>
+                <button id="leave-conv-btn" class="btn btn-danger btn-block">
+                    <i class="fas fa-sign-out-alt"></i> Leave/Delete Group
                 </button>
             </div>
         </div>
