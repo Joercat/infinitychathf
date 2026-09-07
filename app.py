@@ -2045,6 +2045,7 @@ async def _serialize_post(db: aiosqlite.Connection, row: dict, viewer_id: int,
         "quote": quote,
         "created_at_ms": row["created_at_ms"],
         "edited_at_ms": row["edited_at_ms"],
+        "reposted_at_ms": row.get("reposted_at_ms"),
         "reposter_id": reposter_id,
         "reposter": reposter,
         "like_count": await _count_post(db, "social_likes", row["id"]),
@@ -2377,7 +2378,7 @@ async def get_social_feed_rest(
             rows = [r for r in rows if r["created_at_ms"] < cursor]
         rows = rows[:limit]
         posts = await _serialize_post_rows(db, rows, user["id"])
-        posts.sort(key=lambda p: p["created_at_ms"], reverse=True)
+        posts.sort(key=lambda p: p.get("reposted_at_ms") or p["created_at_ms"], reverse=True)
         return {"posts": posts, "cursor": posts[-1]["created_at_ms"] if posts else None}
     finally:
         await db.close()
