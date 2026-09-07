@@ -3310,7 +3310,7 @@
         const body = _el('social-post-input').value.trim();
         if (!body && !SocialState.media.length) return;
         SocialState.media = SocialState.media.slice(0, MAX_POST_MEDIA);
-        const url = `${API}/api/social/posts?body=${encodeURIComponent(body)}&media_json=${encodeURIComponent(JSON.stringify(SocialState.media))}`;
+        const url = `/api/social/posts?body=${encodeURIComponent(body)}&media_json=${encodeURIComponent(JSON.stringify(SocialState.media))}`;
         try {
             const data = await apiPost(url);
             if (data.post) {
@@ -3398,7 +3398,7 @@
     async function socialAction(id, action) {
         try {
             if (action === 'delete') { await deleteSocialPost(id); return; }
-            const url = `${API}/api/social/posts/${id}/${action}`;
+            const url = `/api/social/posts/${id}/${action}`;
             const data = await apiPost(url);
             const post = SocialState.posts.get(Number(id));
             if (post) {

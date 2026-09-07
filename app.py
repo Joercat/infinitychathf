@@ -85,9 +85,12 @@ async def _ensure_column(db: aiosqlite.Connection, table: str, column: str, ddl:
 
 async def init_database():
     os.makedirs(os.path.dirname(DATABASE_URL), exist_ok=True)
+    local_exists = os.path.exists(DATABASE_URL)
     db_existed = download_database(DATABASE_URL)
     if db_existed:
-        logger.info("✅ Restored database from bucket")
+        logger.info("✅ Restored database from storage")
+    elif local_exists:
+        logger.info("📁 Using existing local database")
     else:
         logger.info("🆕 Starting with fresh database")
 
