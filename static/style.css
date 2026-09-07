@@ -123,6 +123,9 @@
     --tick-read:#DDD6FE; --header-bg:#171725; --header-border:#373349;
     --input-bg:#262639; --input-border:#3F3C4A; --input-text:#F5F3FF; --input-placeholder:#A1A1AA;
     --success:#34D399; --warning:#FBBF24; --error:#FB7185; --info:#60A5FA; --sidebar-bg:#12101D;
+    --shadow-xs:0 1px 2px rgba(0,0,0,.4); --shadow-sm:0 1px 3px rgba(0,0,0,.5);
+    --shadow-md:0 4px 6px rgba(0,0,0,.5); --shadow-lg:0 10px 15px rgba(0,0,0,.5);
+    --shadow-xl:0 20px 25px rgba(0,0,0,.5);
 }
 
 /* ---- Ocean Theme ---- */
@@ -135,6 +138,9 @@
     --tick-read:#A7F3D0; --header-bg:#102A37; --header-border:#1E4A55;
     --input-bg:#16414C; --input-border:#27616E; --input-text:#ECFEFF; --input-placeholder:#5F8C9B;
     --success:#2DD4BF; --warning:#FBBF24; --error:#FB7185; --info:#38BDF8; --sidebar-bg:#0B1522;
+    --shadow-xs:0 1px 2px rgba(0,0,0,.4); --shadow-sm:0 1px 3px rgba(0,0,0,.5);
+    --shadow-md:0 4px 6px rgba(0,0,0,.5); --shadow-lg:0 10px 15px rgba(0,0,0,.5);
+    --shadow-xl:0 20px 25px rgba(0,0,0,.5);
 }
 
 /* ---- Sunset Theme ---- */
@@ -147,6 +153,9 @@
     --tick-read:#FED7AA; --header-bg:#271D1A; --header-border:#4A2E2A;
     --input-bg:#3B2522; --input-border:#5A3A34; --input-text:#FFF7ED; --input-placeholder:#A78B7A;
     --success:#34D399; --warning:#FACC15; --error:#F87171; --info:#60A5FA; --sidebar-bg:#1C1613;
+    --shadow-xs:0 1px 2px rgba(0,0,0,.4); --shadow-sm:0 1px 3px rgba(0,0,0,.5);
+    --shadow-md:0 4px 6px rgba(0,0,0,.5); --shadow-lg:0 10px 15px rgba(0,0,0,.5);
+    --shadow-xl:0 20px 25px rgba(0,0,0,.5);
 }
 
 /* ---- Reset ---- */
