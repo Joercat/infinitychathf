@@ -6,7 +6,7 @@
 (function () {
     'use strict';
 
-    const APP_VERSION = '2.0.0';
+    const APP_VERSION = '3.0.0';
 
     // ============================================================
     // Safe storage
@@ -129,6 +129,7 @@
         refreshBlocksBtn: $('refresh-blocks-btn'), blockedUsersList: $('blocked-users-list'),
 
         settingsDisplayName: $('settings-display-name'), settingsUsername: $('settings-username'),
+        settingsBio: $('settings-bio'), settingsLocation: $('settings-location'), settingsWebsite: $('settings-website'),
         settingsAvatarPreview: $('settings-avatar-preview'), settingsAvatarImg: $('settings-avatar-img'),
         avatarInput: $('avatar-input'), avatarUploadBtn: $('avatar-upload-btn'),
         themeOptions: document.querySelectorAll('.theme-option'),
@@ -499,6 +500,7 @@
         store.set('token', State.token);
         showChat();
         connectWebSocket();
+        initSocial();
     }
 
     function showAuthError(msg) {
@@ -2894,6 +2896,9 @@
     function openSettings() {
         DOM.settingsDisplayName.value = State.user?.display_name || '';
         DOM.settingsUsername.value = State.user?.username || '';
+        DOM.settingsBio.value = State.user?.bio || '';
+        DOM.settingsLocation.value = State.user?.location || '';
+        DOM.settingsWebsite.value = State.user?.website || '';
         DOM.pwCurrent.value = '';
         DOM.pwNew.value = '';
         DOM.pwMsg.textContent = '';
@@ -2928,22 +2933,37 @@
 
     async function saveSettings() {
         const newName = DOM.settingsDisplayName.value.trim();
-        if (newName && newName !== State.user?.display_name) {
+        const newBio = DOM.settingsBio.value.trim();
+        const newLocation = DOM.settingsLocation.value.trim();
+        const newWebsite = DOM.settingsWebsite.value.trim();
+        const profileChanged = (newName && newName !== State.user?.display_name) ||
+            newBio !== (State.user?.bio || '') || newLocation !== (State.user?.location || '') ||
+            newWebsite !== (State.user?.website || '');
+        if (profileChanged) {
             try {
-                const res = await fetch(`${API}/api/profile?display_name=${encodeURIComponent(newName)}`, {
+                const params = [];
+                if (newName && newName !== State.user?.display_name) params.push('display_name=' + encodeURIComponent(newName));
+                if (newBio !== (State.user?.bio || '')) params.push('bio=' + encodeURIComponent(newBio));
+                if (newLocation !== (State.user?.location || '')) params.push('location=' + encodeURIComponent(newLocation));
+                if (newWebsite !== (State.user?.website || '')) params.push('website=' + encodeURIComponent(newWebsite));
+                const res = await fetch(`${API}/api/profile?${params.join('&')}`, {
                     method: 'PATCH', headers: { 'X-Auth-Token': State.token }
                 });
                 if (res.ok) {
-                    State.user.display_name = newName;
+                    const data = await res.json();
+                    if (data.user) { State.user = data.user; }
+                    if (newName) State.user.display_name = newName;
+                    State.user.bio = newBio; State.user.location = newLocation; State.user.website = newWebsite;
                     updateSidebarMe();
                     renderSidebar();
                     renderConversationHeader(State.activeConvId);
-                    showToast('Display name updated', 'success');
+                    updateSocialMe();
+                    showToast('Profile updated', 'success');
                 } else {
                     const data = await res.json().catch(() => ({}));
                     throw new Error(data.detail || 'Failed');
                 }
-            } catch (e) { showToast('Failed to update name', 'error'); }
+            } catch (e) { showToast('Failed to update profile', 'error'); }
         }
 
         const avatarFile = DOM.avatarInput.files[0];
@@ -3067,6 +3087,576 @@
     // ============================================================
     // Auth lifecycle
     // ============================================================
+    // ============================================================
+    // Social feed page (Twitter/X-like)
+    // ============================================================
+    const MAX_POST_MEDIA = 4;
+    const SocialState = {
+        inited: false, view: 'home', feedCursor: null,
+        media: [], modalMedia: [], modalMode: 'compose',
+        replyTarget: null, quoteTarget: null, profileUser: null,
+        posts: new Map(), following: new Set(), isSearching: false,
+        searchTimer: null
+    };
+
+    function _el(id) { return document.getElementById(id); }
+
+    function socialInitial(name) { return initialOf(name || '?'); }
+
+    function socialAvatarHtml(user, cls) {
+        const url = user && user.avatar_path ? fileUrl(user.avatar_path) : '';
+        if (url) return `<img class="${cls || ''}" src="${escapeHtml(url)}" alt="" loading="lazy">`;
+        const name = displayNameOf(user);
+        return `<span class="social-avatar-initial ${avatarColorClass('social-' + (name||'?').toLowerCase())}">${escapeHtml(initialOf(name))}</span>`;
+    }
+
+    function socialTime(ms) {
+        if (!ms) return '';
+        const d = new Date(ms), n = new Date();
+        const diff = n - d;
+        if (diff < 60000) return 'now';
+        if (diff < 3600000) return Math.floor(diff/60000) + 'm';
+        if (d.toDateString() === n.toDateString()) return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+        if (diff < 86400000 * 7) return d.toLocaleDateString([], {weekday:'short'}) + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+        return d.toLocaleDateString([], {month:'short', day:'numeric'});
+    }
+
+    function socialCount(n) {
+        if (!n) return '0';
+        if (n >= 1000000) return (n/1000000).toFixed(1).replace(/\.0$/,'') + 'M';
+        if (n >= 1000) return (n/1000).toFixed(1).replace(/\.0$/,'') + 'K';
+        return String(n);
+    }
+
+    function linkifySocial(text) {
+        if (!text) return '';
+        let html = escapeHtml(text);
+        html = html.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+        html = html.replace(/(^|[\s(])(#([A-Za-z0-9_]+))/g,
+            (m, pre, tag, body) => pre + `<a class="social-hashtag" data-hashtag="${encodeURIComponent(body)}" href="javascript:void(0)">#${escapeHtml(body)}</a>`);
+        html = html.replace(/(^|[\s(])(@([A-Za-z0-9_]{1,30}))/g,
+            (m, pre, handle, body) => pre + `<a class="social-mention" data-username="${encodeURIComponent(body)}" href="javascript:void(0)">@${escapeHtml(body)}</a>`);
+        html = html.replace(/(https?:\/\/[^\s<]+)/g,
+            (u) => `<a href="${escapeHtml(u)}" target="_blank" rel="noopener noreferrer">${escapeHtml(u)}</a>`);
+        return html;
+    }
+
+    function socialMediaHtml(media) {
+        if (!media || !media.length) return '';
+        const items = media.map(m => {
+            const fp = m.file_path || '';
+            const name = (m.file_name || fp || '').split('/').pop();
+            const type = (m.file_type || '').toLowerCase();
+            const img = type.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(fp);
+            const video = type.startsWith('video/') || /\.(mp4|webm|mov|ogg)$/i.test(fp);
+            let c = '';
+            if (img) c = `<img src="${escapeHtml(fileUrl(fp))}" alt="${escapeHtml(name)}" loading="lazy">`;
+            else if (video) c = `<video controls preload="metadata" src="${escapeHtml(fileUrl(fp))}"></video>`;
+            else c = `<a class="social-file" href="${escapeHtml(fileUrl(fp))}" target="_blank" rel="noopener"><i class="fas fa-file"></i> ${escapeHtml(name)}</a>`;
+            return `<div class="social-media-item${img ? ' img' : ''}">${c}</div>`;
+        }).join('');
+        return `<div class="social-post-media">${items}</div>`;
+    }
+
+    function socialPostHtml(post) {
+        if (!post) return '';
+        const author = post.author || {};
+        const isOwn = State.user && author.id === State.user.id;
+        const repostLabel = post.reposter_id
+            ? `<div class="social-repost-label"><i class="fas fa-retweet"></i> ${escapeHtml(author.username || '')} reposted</div>`
+            : '';
+        const quote = post.quote ? `
+            <div class="social-quote">
+                <div class="social-post-head"><strong>${escapeHtml(displayNameOf(post.quote.author))}</strong>
+                <span class="social-username">@${escapeHtml(post.quote.author.username || '')}</span></div>
+                <div class="social-post-body">${linkifySocial(post.quote.body || '')}</div>
+            </div>` : '';
+        const actions = `
+            <div class="social-post-actions">
+                <button class="sp-action" data-action="reply" data-id="${post.id}" title="Reply">
+                    <i class="fas fa-comment"></i><span>${socialCount(post.reply_count || 0)}</span>
+                </button>
+                <button class="sp-action${post.reposted ? ' active' : ''}" data-action="repost" data-id="${post.id}" title="Repost">
+                    <i class="fas fa-retweet"></i><span>${socialCount(post.repost_count || 0)}</span>
+                </button>
+                <button class="sp-action${post.liked ? ' active' : ''}" data-action="like" data-id="${post.id}" title="Like">
+                    <i class="fas fa-heart"></i><span>${socialCount(post.like_count || 0)}</span>
+                </button>
+                <button class="sp-action${post.bookmarked ? ' active' : ''}" data-action="bookmark" data-id="${post.id}" title="Bookmark">
+                    <i class="fas fa-bookmark"></i><span>${socialCount(post.bookmark_count || 0)}</span>
+                </button>
+                <button class="sp-action" data-action="quote" data-id="${post.id}" title="Quote">
+                    <i class="fas fa-quote-right"></i><span></span>
+                </button>
+                ${isOwn ? `<button class="sp-action danger" data-action="delete" data-id="${post.id}" title="Delete"><i class="fas fa-trash"></i></button>` : ''}
+                ${!isOwn ? `<button class="sp-action" data-action="profile" data-username="${escapeHtml(author.username || '')}" title="Profile"><i class="fas fa-user"></i></button>` : ''}
+            </div>`;
+        return `<article class="social-post" data-post-id="${post.id}">
+            <div class="social-avatar${author.avatar_path ? '' : ' ah'}">${socialAvatarHtml(author, 'social-avatar-img')}</div>
+            <div class="social-post-main">
+                ${repostLabel}
+                <div class="social-post-head">
+                    <a class="social-profile-link" data-username="${escapeHtml(author.username || '')}" href="javascript:void(0)"><strong>${escapeHtml(displayNameOf(author))}</strong>
+                    <span class="social-username">@${escapeHtml(author.username || '')}</span></a>
+                    <span class="social-dot">·</span><time class="social-time" title="${new Date(post.created_at_ms || 0).toLocaleString()}">${socialTime(post.created_at_ms)}</time>
+                    ${post.edited_at_ms ? '<span class="social-edited">· edited</span>' : ''}
+                </div>
+                <div class="social-post-body">${linkifySocial(post.body || '')}</div>
+                ${socialMediaHtml(post.media)}
+                ${quote}
+                ${actions}
+            </div>
+        </article>`;
+    }
+
+    function renderSocialPosts(posts, container) {
+        const el = container || _el('social-feed');
+        if (!el) return;
+        if (!posts || !posts.length) {
+            const empty = document.createElement('div');
+            empty.className = 'social-feed-empty';
+            empty.innerHTML = '<i class="fas fa-feather"></i><h3>Nothing here yet</h3><p>Follow people or make the first post.</p>';
+            el.innerHTML = '';
+            el.appendChild(empty);
+            return;
+        }
+        posts.forEach(p => SocialState.posts.set(p.id, p));
+        el.innerHTML = posts.map(socialPostHtml).join('');
+    }
+
+    async function openSocial() {
+        if (!State.user) return;
+        _el('social-screen').classList.add('active');
+        DOM.chatScreen.classList.remove('active');
+        updateSocialMe();
+        if (!SocialState.inited) initSocial();
+        await SocialLoad.view(SocialState.view || 'home');
+    }
+
+    function backToChat() {
+        SocialState.isSearching = false;
+        SocialState.profileUser = null;
+        _el('social-screen').classList.remove('active');
+        DOM.chatScreen.classList.add('active');
+        updateSidebarMe();
+    }
+
+    function updateSocialMe() {
+        if (!State.user) return;
+        _el('social-me-name').textContent = displayNameOf(State.user);
+        _el('social-me-username').textContent = '@' + (State.user.username || '');
+        const av = _el('social-me-avatar'), ph = _el('social-me-avatar-ph');
+        if (State.user.avatar_path) { av.src = fileUrl(State.user.avatar_path); av.classList.remove('hidden'); ph.classList.add('hidden'); }
+        else { av.classList.add('hidden'); ph.classList.remove('hidden'); ph.textContent = socialInitial(displayNameOf(State.user)); }
+        const cAv = _el('social-compose-avatar'), cPh = _el('social-compose-avatar-ph');
+        if (State.user.avatar_path) { cAv.src = fileUrl(State.user.avatar_path); cAv.classList.remove('hidden'); cPh.classList.add('hidden'); }
+        else { cAv.classList.add('hidden'); cPh.classList.remove('hidden'); cPh.textContent = socialInitial(displayNameOf(State.user)); }
+    }
+
+    async function uploadSocialFile(file) {
+        if (!file) return null;
+        if (file.size > 50 * 1024 * 1024) throw new Error('Media files must be under 50MB');
+        if (!State.user) throw new Error('Not signed in');
+        const fd = new FormData();
+        fd.append('file', file);
+        const url = `${API}/api/upload/chunk?chunk_index=0&total_chunks=1&file_name=${encodeURIComponent(file.name)}&file_type=${encodeURIComponent(file.type || 'application/octet-stream')}&file_size=${file.size}&upload_id=${generateId()}`;
+        const res = await fetch(url, { method: 'POST', headers: { 'X-Auth-Token': State.token }, body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Upload failed');
+        return data;
+    }
+
+    function socialPreviewMedia() {
+        const list = SocialState.media;
+        const box = _el('social-media-preview');
+        if (!list.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+        box.classList.remove('hidden');
+        box.innerHTML = list.map((m, i) => `
+            <div class="social-media-preview-item">
+                ${m.file_type && m.file_type.startsWith('video/') ? `<video src="${escapeHtml(fileUrl(m.file_path))}" muted></video>` : `<img src="${escapeHtml(fileUrl(m.file_path))}" alt="">`}
+                <button class="btn-icon btn-icon-sm" data-remove-media="${i}"><i class="fas fa-times"></i></button>
+            </div>`).join('');
+    }
+
+    async function addSocialMedia(files, modal) {
+        if (!files || !files.length) return;
+        try {
+            const target = modal ? SocialState.modalMedia : SocialState.media;
+            for (const f of Array.from(files)) {
+                if (target.length >= MAX_POST_MEDIA) { showToast('A post can contain at most ' + MAX_POST_MEDIA + ' media files', 'warning'); break; }
+                const up = await uploadSocialFile(f);
+                if (!up) continue;
+                target.push({ file_path: up.file_path, file_name: up.file_name, file_type: up.file_type, file_size: up.file_size });
+            }
+            socialPreviewMedia();
+            if (modal) socialPreviewModalMedia();
+        } catch (e) { showToast(e.message, 'error'); }
+        finally { if (modal) _el('social-compose-modal-media').value = ''; else _el('social-media-input').value = ''; }
+    }
+
+    function socialPreviewModalMedia() {
+        const list = SocialState.modalMedia;
+        const box = _el('social-compose-modal-media-preview');
+        if (!list.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+        box.classList.remove('hidden');
+        box.innerHTML = list.map((m, i) => `
+            <div class="social-media-preview-item">
+                ${m.file_type && m.file_type.startsWith('video/') ? `<video src="${escapeHtml(fileUrl(m.file_path))}" muted></video>` : `<img src="${escapeHtml(fileUrl(m.file_path))}" alt="">`}
+                <button class="btn-icon btn-icon-sm" data-remove-modal-media="${i}"><i class="fas fa-times"></i></button>
+            </div>`).join('');
+    }
+
+    async function submitSocialPost() {
+        const body = _el('social-post-input').value.trim();
+        if (!body && !SocialState.media.length) return;
+        SocialState.media = SocialState.media.slice(0, MAX_POST_MEDIA);
+        const url = `${API}/api/social/posts?body=${encodeURIComponent(body)}&media_json=${encodeURIComponent(JSON.stringify(SocialState.media))}`;
+        try {
+            const data = await apiPost(url);
+            if (data.post) {
+                _el('social-post-input').value = '';
+                SocialState.media = [];
+                socialPreviewMedia();
+                _el('social-post-btn').disabled = true;
+                showToast('Posted!', 'success');
+                await SocialLoad.view(SocialState.view, true);
+            }
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function submitModalSocialPost() {
+        const body = _el('social-compose-modal-input').value.trim();
+        const media = SocialState.modalMedia;
+        if (!body && !media.length) return;
+        const q = [];
+        q.push('body=' + encodeURIComponent(body));
+        if (media.length) q.push('media_json=' + encodeURIComponent(JSON.stringify(media)));
+        if (SocialState.replyTarget) q.push('reply_to_id=' + socialInt(SocialState.replyTarget.id));
+        if (SocialState.quoteTarget) q.push('quote_id=' + socialInt(SocialState.quoteTarget.id));
+        try {
+            const data = await apiPost(`/api/social/posts?${q.join('&')}`);
+            if (data.post) {
+                closeModal(_el('social-compose-modal'));
+                SocialState.modalMedia = []; SocialState.replyTarget = null; SocialState.quoteTarget = null;
+                _el('social-compose-modal-input').value = '';
+                _el('social-compose-modal-context').classList.add('hidden');
+                socialPreviewModalMedia();
+                showToast('Posted!', 'success');
+                await SocialLoad.view(SocialState.view, true);
+            }
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function socialInt(v) { const n = Number(v); return Number.isFinite(n) ? Math.floor(n) : null; }
+
+    function openSocialComposeModal(mode, target) {
+        SocialState.modalMode = mode || 'compose';
+        SocialState.replyTarget = mode === 'reply' ? target : null;
+        SocialState.quoteTarget = mode === 'quote' ? target : null;
+        const context = _el('social-compose-modal-context');
+        if (SocialState.replyTarget || SocialState.quoteTarget) {
+            const post = SocialState.replyTarget || SocialState.quoteTarget;
+            context.classList.remove('hidden');
+            const label = SocialState.replyTarget ? 'Replying to' : 'Quoting';
+            context.innerHTML = `${label} <strong>@${escapeHtml(post.author?.username || '')}</strong> — ${escapeHtml(truncate(post.body || '', 120))}`;
+        } else context.classList.add('hidden');
+        _el('social-compose-modal-title').innerHTML = mode === 'reply' ? '<i class="fas fa-reply"></i> Reply' : mode === 'quote' ? '<i class="fas fa-quote-right"></i> Quote' : '<i class="fas fa-feather"></i> Compose';
+        openModal(_el('social-compose-modal'));
+        setTimeout(() => _el('social-compose-modal-input').focus(), 50);
+    }
+
+    function userCardHtml(u) {
+        return `<div class="social-user-card" data-username="${escapeHtml(u.username || '')}">
+            <div class="user-avatar">${socialAvatarHtml(u)}</div>
+            <div class="social-user-info"><strong>${escapeHtml(displayNameOf(u))}</strong><span>@${escapeHtml(u.username || '')}</span></div>
+            <button class="btn btn-primary btn-sm social-follow-btn" data-follow="${escapeHtml(u.username || '')}">Follow</button>
+        </div>`;
+    }
+
+    async function toggleFollow(username, btn) {
+        try {
+            const data = await apiPost(`/api/social/users/${encodeURIComponent(username)}/follow`);
+            if (data.following) { SocialState.following.add(username.toLowerCase()); }
+            else { SocialState.following.delete(username.toLowerCase()); }
+            document.querySelectorAll(`[data-follow="${CSS.escape(username)}"], [data-profile-follow="${CSS.escape(username)}"]`).forEach(b => {
+                b.textContent = data.following ? 'Following' : 'Follow';
+                b.classList.toggle('following', data.following);
+            });
+            await SocialLoad.suggestions();
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function deleteSocialPost(id) {
+        try {
+            await apiDelete(`/api/social/posts/${id}`);
+            const el = document.querySelector(`[data-post-id="${id}"]`);
+            if (el) el.remove();
+            showToast('Post deleted', 'success');
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function socialAction(id, action) {
+        try {
+            if (action === 'delete') { await deleteSocialPost(id); return; }
+            const url = `${API}/api/social/posts/${id}/${action}`;
+            const data = await apiPost(url);
+            const post = SocialState.posts.get(Number(id));
+            if (post) {
+                if (action === 'like') { post.liked = data.liked; post.like_count = data.like_count; }
+                if (action === 'repost') { post.reposted = data.reposted; post.repost_count = data.repost_count; }
+                if (action === 'bookmark') { post.bookmarked = data.bookmarked; post.bookmark_count = data.bookmark_count || post.bookmark_count; }
+            }
+            const card = document.querySelector(`[data-post-id="${id}"]`);
+            if (card) {
+                const b = card.querySelector(`[data-action="${action}"]`);
+                if (b) {
+                    if (action === 'like') b.classList.toggle('active', data.liked);
+                    if (action === 'repost') b.classList.toggle('active', data.reposted);
+                    if (action === 'bookmark') b.classList.toggle('active', data.bookmarked);
+                    const span = b.querySelector('span');
+                    if (span && action !== 'bookmark') span.textContent = socialCount(data.like_count != null ? data.like_count : data.repost_count);
+                }
+            }
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function openProfile(username) {
+        if (!username) return;
+        try {
+            SocialState.profileUser = { username };
+            SocialState.isSearching = false;
+            const prof = await apiGet(`/api/social/profile/${encodeURIComponent(username)}`);
+            const posts = await apiGet(`/api/social/users/${encodeURIComponent(username)}/posts`);
+            SocialState.profileUser = prof.profile;
+            _el('social-compose').style.display = 'none';
+            _el('social-page-title').textContent = '@' + username;
+            _el('social-page-sub').textContent = displayNameOf(prof.profile) + "'s posts";
+            document.querySelectorAll('.social-nav-link').forEach(l => l.classList.toggle('active', l.dataset.socialView === 'profile' && SocialState.user?.username === username));
+            const p = prof.profile;
+            const followBtn = p.is_self ? '' : `<button class="btn btn-primary btn-sm ${p.is_following ? 'following' : ''}" data-profile-follow="${escapeHtml(p.username)}">${p.is_following ? 'Following' : 'Follow'}</button>`;
+            const header = `
+                <section class="social-profile-card">
+                    <div class="social-profile-avatar">${p.avatar_path ? `<img src="${escapeHtml(fileUrl(p.avatar_path))}" alt="">` : `<span>${escapeHtml(initialOf(displayNameOf(p)))}</span>`}</div>
+                    <div class="social-profile-info">
+                        <div class="social-profile-name"><h2>${escapeHtml(displayNameOf(p))}</h2> <span class="text-secondary">@${escapeHtml(p.username)}</span> ${followBtn}</div>
+                        ${p.bio ? `<p class="social-profile-bio">${linkifySocial(p.bio)}</p>` : ''}
+                        <div class="social-profile-meta">
+                            ${p.location ? `<span><i class="fas fa-map-marker-alt"></i> ${escapeHtml(p.location)}</span>` : ''}
+                            ${p.website ? `<a href="${escapeHtml(p.website)}" target="_blank" rel="noopener"><i class="fas fa-link"></i> ${escapeHtml(p.website.replace(/^https?:\/\//,''))}</a>` : ''}
+                        </div>
+                        <div class="social-profile-stats">
+                            <span><strong>${socialCount(p.posts_count || 0)}</strong> Posts</span>
+                            <span><strong>${socialCount(p.followers_count || 0)}</strong> Followers</span>
+                            <span><strong>${socialCount(p.following_count || 0)}</strong> Following</span>
+                        </div>
+                    </div>
+                </section>`;
+            renderSocialPosts([], _el('social-feed'));
+            _el('social-feed').innerHTML = header + (posts.posts && posts.posts.length ? posts.posts.map(socialPostHtml).join('') : '<div class="social-feed-empty"><i class="fas fa-feather"></i><h3>No posts yet</h3></div>');
+            _el('social-search-input').value = '';
+            _el('social-search-clear').classList.add('hidden');
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    const SocialLoad = {
+        async view(name, force) {
+            SocialState.isSearching = false;
+            SocialState.profileUser = null;
+            SocialState.view = name;
+            document.querySelectorAll('.social-nav-link').forEach(l => l.classList.toggle('active', l.dataset.socialView === name));
+            const titles = { home: ['Home', 'Posts from people you follow'], explore: ['Explore', 'Discover what is happening'], notifications: ['Notifications', 'Your social activity'], bookmarks: ['Bookmarks', 'Your saved posts'], profile: ['My Profile', 'Your public profile'] };
+            const t = titles[name] || ['Home', ''];
+            _el('social-page-title').textContent = t[0]; _el('social-page-sub').textContent = t[1];
+            _el('social-compose').style.display = (name === 'home' || name === 'explore') ? '' : 'none';
+            _el('social-search-input').value = '';
+            _el('social-search-clear').classList.add('hidden');
+            if (name === 'notifications') { await this.notifications(); return; }
+            if (name === 'bookmarks') { await this.bookmarks(); return; }
+            if (name === 'profile') { await openProfile(State.user.username); return; }
+            const feed = name === 'explore' ? 'explore' : 'home';
+            await this.feed(feed, force);
+        },
+        async feed(feed, force) {
+            const loading = _el('social-loading');
+            loading.classList.remove('hidden');
+            try {
+                const data = await apiGet(`/api/social/feed?feed=${feed}&limit=50`);
+                if (!force) SocialState.posts.clear();
+                renderSocialPosts(data.posts || []);
+            } catch (e) { showToast(e.message, 'error'); }
+            finally { loading.classList.add('hidden'); }
+        },
+        async notifications() {
+            try {
+                const data = await apiGet(`/api/social/notifications`);
+                const list = data.notifications || [];
+                if (!list.length) { renderSocialPosts([], _el('social-feed')); return; }
+                const unread = list.filter(n => !n.read).length;
+                _el('social-unread-badge').textContent = unread;
+                _el('social-unread-badge').classList.toggle('hidden', !unread);
+                _el('social-feed').innerHTML = list.map(n => `
+                    <article class="social-notification" data-post-id="${n.post_id || ''}">
+                        <div class="social-avatar ah">${socialAvatarHtml(n.actor, 'social-avatar-img')}</div>
+                        <div class="social-post-main">
+                            <div class="social-notification-body"><strong>${escapeHtml(displayNameOf(n.actor))}</strong>
+                            <span class="social-username">@${escapeHtml(n.actor.username || '')}</span> ${escapeHtml(n.type)}d</div>
+                            <span class="social-time">${socialTime(n.created_at_ms)}</span>
+                        </div>
+                    </article>`).join('');
+                await apiPost(`/api/social/notifications/read`);
+                _el('social-unread-badge').classList.add('hidden');
+            } catch (e) { showToast(e.message, 'error'); }
+        },
+        async bookmarks() {
+            try {
+                const data = await apiGet(`/api/social/bookmarks`);
+                renderSocialPosts(data.posts || []);
+            } catch (e) { showToast(e.message, 'error'); }
+        },
+        async trending() {
+            try {
+                const data = await apiGet(`/api/social/trending`);
+                const box = _el('social-trending-list');
+                if (!data.trending || !data.trending.length) { box.innerHTML = '<div class="text-secondary">No trends yet</div>'; return; }
+                box.innerHTML = data.trending.slice(0, 8).map(t => `<button class="social-trend-item" data-hashtag="${encodeURIComponent(t.tag)}"><span class="social-trend-rank">${'#'}</span><span>#${escapeHtml(t.tag)}</span><span class="social-trend-count">${socialCount(t.count)} posts</span></button>`).join('');
+            } catch (e) { /* non-fatal */ }
+        },
+        async suggestions() {
+            try {
+                const data = await apiGet(`/api/social/suggestions?limit=5`);
+                const box = _el('social-suggest-list');
+                if (!data.users || !data.users.length) { box.innerHTML = '<div class="text-secondary">You are all caught up</div>'; return; }
+                box.innerHTML = data.users.map(userCardHtml).join('');
+            } catch (e) { box.innerHTML = '<div class="text-secondary">Could not load suggestions</div>'; }
+        }
+    };
+
+    async function socialSearch(q) {
+        q = (q || '').trim();
+        _el('social-search-clear').classList.toggle('hidden', !q);
+        if (!q) { await SocialLoad.view(SocialState.view || 'home'); return; }
+        SocialState.isSearching = true;
+        _el('social-compose').style.display = 'none';
+        _el('social-page-title').textContent = 'Search';
+        _el('social-page-sub').textContent = 'Results for "' + q + '"';
+        try {
+            const data = await apiGet(`/api/social/search?q=${encodeURIComponent(q)}`);
+            const users = (data.users || []).map(userCardHtml).join('');
+            const posts = (data.posts || []).map(socialPostHtml).join('');
+            _el('social-feed').innerHTML = (users ? `<section class="social-search-users"><h3>People</h3>${users}</section>` : '') + (posts ? `<section class="social-search-posts"><h3>Posts</h3>${posts}</section>` : (!users && !posts ? '<div class="social-feed-empty"><i class="fas fa-search"></i><h3>No results</h3></div>' : ''));
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function initSocial() {
+        if (SocialState.inited) return;
+        SocialState.inited = true;
+        updateSocialMe();
+        const sc = _el('social-screen');
+        if (!sc) return;
+        _el('social-back-btn').addEventListener('click', backToChat);
+        _el('social-btn')?.addEventListener('click', openSocial);
+        _el('social-compose-nav-btn')?.addEventListener('click', () => openSocialComposeModal());
+        _el('social-post-btn')?.addEventListener('click', submitSocialPost);
+        document.querySelectorAll('.social-nav-link').forEach(l => l.addEventListener('click', () => SocialLoad.view(l.dataset.socialView)));
+        _el('social-media-input')?.addEventListener('change', e => addSocialMedia(e.target.files, false));
+        _el('social-compose-modal-media')?.addEventListener('change', e => addSocialMedia(e.target.files, true));
+        _el('social-compose-modal-submit')?.addEventListener('click', submitModalSocialPost);
+        _el('social-search-input')?.addEventListener('input', debounce(e => socialSearch(e.target.value), 350));
+        _el('social-search-clear')?.addEventListener('click', () => { _el('social-search-input').value=''; socialSearch(''); });
+        _el('social-backups-btn')?.addEventListener('click', openBackupsModal);
+        _el('social-post-input')?.addEventListener('input', () => { _el('social-post-btn').disabled = !_el('social-post-input').value.trim() && !SocialState.media.length; _el('social-post-count').textContent = _el('social-post-input').value.length ? `${_el('social-post-input').value.length}/28000` : ''; });
+        _el('social-feed')?.addEventListener('click', async (e) => {
+            const fbtn = e.target.closest('[data-follow]'), pbtn = e.target.closest('[data-profile-follow]');
+            if (fbtn) { await toggleFollow(fbtn.dataset.follow, fbtn); return; }
+            if (pbtn) { await toggleFollow(pbtn.dataset.profileFollow, pbtn); return; }
+            const profile = e.target.closest('[data-username]');
+            if (profile && !e.target.closest('.sp-action') && !e.target.closest('.social-follow-btn')) { openProfile(profile.dataset.username); return; }
+            const mention = e.target.closest('[data-username]');
+            if (mention) { openProfile(mention.dataset.username); return; }
+            const hashtag = e.target.closest('[data-hashtag]');
+            if (hashtag) { socialSearch('#' + decodeURIComponent(hashtag.dataset.hashtag)); _el('social-search-input').value = '#' + decodeURIComponent(hashtag.dataset.hashtag); return; }
+            const actionBtn = e.target.closest('[data-action]');
+            if (actionBtn) {
+                const id = Number(actionBtn.dataset.id), action = actionBtn.dataset.action;
+                if (action === 'reply') { const post = SocialState.posts.get(id); openSocialComposeModal('reply', post); return; }
+                if (action === 'quote') { const post = SocialState.posts.get(id); openSocialComposeModal('quote', post); return; }
+                if (action === 'profile') { const un = actionBtn.dataset.username; openProfile(un); return; }
+                await socialAction(id, action); return;
+            }
+            const notif = e.target.closest('.social-notification');
+            if (notif && notif.dataset.postId) {
+                try { const data = await apiGet(`/api/social/posts/${notif.dataset.postId}`); SocialState.posts.set(data.post.id, data.post); renderSocialPosts([data.post]); _el('social-compose').style.display='none'; }
+                catch (e2) { showToast(e2.message, 'error'); }
+            }
+        });
+        _el('social-media-preview')?.addEventListener('click', (e) => { const b = e.target.closest('[data-remove-media]'); if (b) { SocialState.media.splice(Number(b.dataset.removeMedia), 1); socialPreviewMedia(); } });
+        _el('social-compose-modal-media-preview')?.addEventListener('click', (e) => { const b = e.target.closest('[data-remove-modal-media]'); if (b) { SocialState.modalMedia.splice(Number(b.dataset.removeModalMedia), 1); socialPreviewModalMedia(); } });
+        _el('social-logout-btn')?.addEventListener('click', () => { const logoutBtn = document.getElementById('logout-btn'); if (logoutBtn) logoutBtn.click(); });
+        _el('backups-list')?.addEventListener('click', (e) => {
+            const btn = e.target.closest('.backup-restore-btn');
+            if (btn) restoreFromBackup(btn);
+        });
+        SocialLoad.trending();
+        SocialLoad.suggestions();
+    }
+
+    function openBackupsModal() {
+        openModal(_el('backups-modal'));
+        loadBackups();
+    }
+
+    async function loadBackups() {
+        const box = _el('backups-list');
+        try {
+            const headers = { 'X-Auth-Token': State.token };
+            const key = _el('backups-admin-key').value.trim();
+            if (key) headers['X-Backup-Key'] = key;
+            const res = await fetch(`${API}/api/admin/backups`, { headers });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Could not load backups');
+            if (!data.backups || !data.backups.length) { box.innerHTML = '<div class="backups-empty">No backups yet. The first hourly backup will appear soon.</div>'; return; }
+            box.innerHTML = data.backups.map(b => `
+                <div class="backup-item">
+                    <div class="backup-item-info">
+                        <strong>${escapeHtml(b.category)} · ${escapeHtml(b.timestamp)}</strong>
+                        <span>${b.file_count || 0} files · ${formatFileSize(b.size || 0)}${b.has_database ? ' · with DB' : ''}</span>
+                    </div>
+                    <div class="backup-item-actions">
+                        <button class="btn btn-secondary btn-sm backup-restore-btn" data-path="${escapeHtml(b.path)}">Restore</button>
+                    </div>
+                </div>`).join('');
+        } catch (e) { box.innerHTML = `<div class="backups-empty">${escapeHtml(e.message)}</div>`; }
+    }
+
+    async function restoreFromBackup(btn) {
+        if (!confirm('Restore this backup? This overwrites the live database and all restored files. The server will be restarted to apply it.')) return;
+        btn.disabled = true; btn.textContent = 'Restoring…';
+        try {
+            const headers = { 'X-Auth-Token': State.token };
+            const key = _el('backups-admin-key').value.trim();
+            if (key) headers['X-Backup-Key'] = key;
+            const res = await fetch(`${API}/api/admin/backups/${encodeURIComponent(btn.dataset.path).replace(/%2F/g, '/')}/restore`, { method: 'POST', headers });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Restore failed');
+            showToast('Backup restored. Please restart the server to apply.', 'success');
+        } catch (err) { showToast(err.message, 'error'); }
+        finally { btn.disabled = false; btn.textContent = 'Restore'; }
+    }
+
+    _el('backups-refresh-btn')?.addEventListener('click', loadBackups);
+    _el('backups-create-btn')?.addEventListener('click', async () => {
+        try {
+            const headers = { 'X-Auth-Token': State.token };
+            const key = _el('backups-admin-key').value.trim();
+            if (key) headers['X-Backup-Key'] = key;
+            const res = await fetch(`${API}/api/admin/backups/create`, { method: 'POST', headers });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Backup failed');
+            showToast('Backup created!', 'success');
+            loadBackups();
+        } catch (e) { showToast(e.message, 'error'); }
+    });
+
     async function init() {
         applyPrefs();
         DOM.aboutVersion.textContent = APP_VERSION;
@@ -3078,6 +3668,7 @@
                     State.user = data.user;
                     showChat();
                     connectWebSocket();
+                    initSocial();
                     return;
                 }
             } catch (e) { /* fall through to auth screen */ }
@@ -3095,6 +3686,8 @@
 
     function showChat() {
         DOM.authScreen.classList.remove('active');
+        const sc = document.getElementById('social-screen');
+        if (sc) sc.classList.remove('active');
         DOM.chatScreen.classList.add('active');
         updateSidebarMe();
     }

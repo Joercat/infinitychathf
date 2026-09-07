@@ -25,13 +25,15 @@ from cryptography.hazmat.backends import default_backend
 
 from storage_handler import (
     store_file, retrieve_file, delete_file,
-    download_database, upload_database, start_db_sync
+    download_database, upload_database, start_db_sync,
+    list_backups, create_timestamped_backup, restore_backup, start_backup_loop,
+    StorageUnavailableError
 )
 
 # ------------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------------
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 DATABASE_URL = os.environ.get("DATABASE_URL", "/data/infinitychat.db")
 MESSAGE_KEY_B64 = os.environ.get("SECRET_KEY", None)
 FILE_ENCRYPTION_KEY_B64 = os.environ.get("FILE_ENCRYPTION_KEY", None)
@@ -178,6 +180,78 @@ async def init_database():
             )
         """)
 
+        # --- v3: social feed / Twitter-like features ---
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS social_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                author_id INTEGER NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                media_json TEXT,
+                reply_to_id INTEGER,
+                quote_id INTEGER,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL,
+                edited_at_ms INTEGER,
+                FOREIGN KEY(author_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(reply_to_id) REFERENCES social_posts(id) ON DELETE SET NULL,
+                FOREIGN KEY(quote_id) REFERENCES social_posts(id) ON DELETE SET NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS social_likes (
+                post_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (post_id, user_id),
+                FOREIGN KEY(post_id) REFERENCES social_posts(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS social_reposts (
+                post_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (post_id, user_id),
+                FOREIGN KEY(post_id) REFERENCES social_posts(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS social_bookmarks (
+                post_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (post_id, user_id),
+                FOREIGN KEY(post_id) REFERENCES social_posts(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS follows (
+                follower_id INTEGER NOT NULL,
+                following_id INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (follower_id, following_id),
+                FOREIGN KEY(follower_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(following_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS social_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                actor_id INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                post_id INTEGER,
+                created_at_ms INTEGER NOT NULL,
+                read INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(actor_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(post_id) REFERENCES social_posts(id) ON DELETE CASCADE
+            )
+        """)
+
         # --- Additive migrations for databases created before v2 ---
         msg_cols = await _table_columns(db, "messages")
         if "conversation_id" not in msg_cols:
@@ -196,6 +270,9 @@ async def init_database():
             "avatar_path": "TEXT",
             "last_seen": "INTEGER DEFAULT (strftime('%s','now'))",
             "status": "TEXT DEFAULT 'offline'",
+            "bio": "TEXT NOT NULL DEFAULT ''",
+            "location": "TEXT NOT NULL DEFAULT ''",
+            "website": "TEXT NOT NULL DEFAULT ''",
         }.items():
             if col not in usr_cols:
                 await _ensure_column(db, "users", col, ddl)
@@ -286,11 +363,30 @@ async def init_database():
                          "ON user_blocks(blocked_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_blocks_blocker "
                          "ON user_blocks(blocker_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_posts_author_time "
+                         "ON social_posts(author_id, created_at_ms)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_posts_time "
+                         "ON social_posts(created_at_ms)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_posts_reply "
+                         "ON social_posts(reply_to_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_follows_following "
+                         "ON follows(following_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_follows_follower "
+                         "ON follows(follower_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_likes_post "
+                         "ON social_likes(post_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_reposts_post "
+                         "ON social_reposts(post_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_user "
+                         "ON social_bookmarks(user_id, post_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user "
+                         "ON social_notifications(user_id, read, created_at_ms)")
         await db.commit()
 
     upload_database(DATABASE_URL)
     start_db_sync(DATABASE_URL)
-    logger.info("✅ Database initialized successfully (schema v2)")
+    start_backup_loop(DATABASE_URL)
+    logger.info("✅ Database initialized successfully (schema v3)")
 
     # Clean up any leftover temp upload dirs from previous runs
     _cleanup_temp_dir()
@@ -408,7 +504,7 @@ async def authenticate_user(token: str) -> Optional[dict]:
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, display_name, avatar_path, status FROM users WHERE token = ?",
+            "SELECT id, username, display_name, avatar_path, status, bio, location, website FROM users WHERE token = ?",
             (token,)
         )
         user = await cursor.fetchone()
@@ -993,7 +1089,10 @@ async def get_profile(token: str = Header(..., alias="X-Auth-Token")):
 
 @app.patch("/api/profile")
 async def update_profile(
-    display_name: str = Query(..., max_length=50),
+    display_name: str = Query(None, max_length=50),
+    bio: str = Query(None, max_length=200),
+    location: str = Query(None, max_length=80),
+    website: str = Query(None, max_length=160),
     token: str = Header(..., alias="X-Auth-Token")
 ):
     user = await authenticate_user(token)
@@ -1001,21 +1100,38 @@ async def update_profile(
         raise HTTPException(401)
     db = await get_db()
     try:
-        updated_name = display_name.strip() or user['username']
-        await db.execute(
-            "UPDATE users SET display_name = ? WHERE id = ?",
-            (updated_name, user['id'])
-        )
-        await db.commit()
-        schedule_db_sync()
-        user['display_name'] = updated_name
-        # Live presence uses in-memory state; keep the online-users list fresh
-        manager.update_profile(user['id'], display_name=updated_name, avatar_path=user.get('avatar_path'))
+        updates = []
+        args = []
+        if display_name is not None:
+            updates.append("display_name = ?")
+            args.append(display_name.strip() or user['username'])
+        if bio is not None:
+            updates.append("bio = ?")
+            args.append(bio.strip()[:200])
+        if location is not None:
+            updates.append("location = ?")
+            args.append(location.strip()[:80])
+        if website is not None:
+            website = (website or "").strip()
+            if website and not re.match(r"^https?://", website, re.I):
+                website = "https://" + website
+            updates.append("website = ?")
+            args.append(website[:160])
+        if updates:
+            args.append(user['id'])
+            await db.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", args)
+            await db.commit()
+            schedule_db_sync()
+            user = await authenticate_user(token)
+        else:
+            raise HTTPException(400, "No profile fields supplied")
+        manager.update_profile(user['id'], display_name=user.get('display_name'),
+                               avatar_path=user.get('avatar_path'))
         await manager.broadcast({
             "type": "profile_updated",
             "user_id": user['id'],
             "username": user['username'],
-            "display_name": updated_name,
+            "display_name": user.get('display_name'),
             "avatar_path": user.get('avatar_path'),
         })
         return {"user": user}
@@ -1118,7 +1234,10 @@ async def upload_avatar(
         elif detected == "image/webp":
             ext = ".webp"
         remote_path = f"avatars/{user['username']}_{uuid.uuid4().hex}{ext}"
-        await asyncio.to_thread(store_file, remote_path, data)
+        try:
+            await asyncio.to_thread(store_file, remote_path, data)
+        except StorageUnavailableError:
+            raise HTTPException(503, "File storage is unavailable")
     finally:
         os.unlink(tmp_path)
 
@@ -1798,6 +1917,695 @@ async def unblock_user_rest(user_id: int, token: str = Header(..., alias="X-Auth
 
 
 # ------------------------------------------------------------------------
+# Social feed (Twitter/X-like)
+# ------------------------------------------------------------------------
+MAX_POST_LENGTH = 28000
+MAX_POST_MEDIA = 4
+BACKUP_ADMIN_KEY = os.environ.get("BACKUP_ADMIN_KEY", "")
+
+
+async def _blocked_user_ids(db: aiosqlite.Connection, uid: int) -> set:
+    """All users who are in a block relationship with uid (either direction)."""
+    cursor = await db.execute(
+        "SELECT blocker_id, blocked_id FROM user_blocks "
+        "WHERE blocker_id = ? OR blocked_id = ?",
+        (uid, uid)
+    )
+    ids = set()
+    for row in await cursor.fetchall():
+        ids.add(row["blocker_id"])
+        ids.add(row["blocked_id"])
+    ids.discard(uid)
+    return ids
+
+
+async def _social_user(db: aiosqlite.Connection, uid: int) -> dict:
+    cursor = await db.execute(
+        "SELECT id, username, display_name, avatar_path, bio, location, website "
+        "FROM users WHERE id = ?", (uid,)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(404, "User not found")
+    return dict(row)
+
+
+async def _toggle_row(db: aiosqlite.Connection, table: str, post_id: int, uid: int):
+    """Insert/remove a (post_id,user_id) row; returns True when now present."""
+    cursor = await db.execute(f"SELECT 1 FROM {table} WHERE post_id = ? AND user_id = ?",
+                              (post_id, uid))
+    exists = await cursor.fetchone() is not None
+    if exists:
+        await db.execute(f"DELETE FROM {table} WHERE post_id = ? AND user_id = ?", (post_id, uid))
+        return False
+    await db.execute(f"INSERT INTO {table} (post_id, user_id, created_at_ms) VALUES (?,?,?)",
+                     (post_id, uid, int(time.time() * 1000)))
+    return True
+
+
+async def _count_post(db: aiosqlite.Connection, table: str, post_id: int) -> int:
+    cursor = await db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE post_id = ?", (post_id,))
+    row = await cursor.fetchone()
+    return row["c"] or 0
+
+
+async def _post_exists(db: aiosqlite.Connection, post_id: int, include_deleted: bool = False) -> bool:
+    sql = "SELECT 1 FROM social_posts WHERE id = ?"
+    args = [post_id]
+    if not include_deleted:
+        sql += " AND is_deleted = 0"
+    cursor = await db.execute(sql, args)
+    return await cursor.fetchone() is not None
+
+
+async def _post_author_id(db: aiosqlite.Connection, post_id: int) -> Optional[int]:
+    cur = await db.execute("SELECT author_id FROM social_posts WHERE id = ?", (post_id,))
+    row = await cur.fetchone()
+    return row["author_id"] if row else None
+
+
+async def _ensure_interactable_post(db: aiosqlite.Connection, post_id: int, viewer_id: int) -> None:
+    author = await _post_author_id(db, post_id)
+    if author is None:
+        raise HTTPException(404, "Post not found")
+    if await _block_exists(db, viewer_id, author):
+        raise HTTPException(403, "You cannot interact with this user")
+
+
+async def _serialize_post(db: aiosqlite.Connection, row: dict, viewer_id: int,
+                          reposter_id: int = None) -> dict:
+    author = await _social_user(db, row["author_id"])
+    media = []
+    if row.get("media_json"):
+        try:
+            media = json.loads(row["media_json"])
+        except Exception:
+            media = []
+    quote = None
+    if row.get("quote_id"):
+        qcur = await db.execute("SELECT * FROM social_posts WHERE id = ?", (row["quote_id"],))
+        qrow = await qcur.fetchone()
+        if qrow and not qrow["is_deleted"] and not await _block_exists(db, viewer_id, qrow["author_id"]):
+            quote = await _serialize_post(db, dict(qrow), viewer_id)
+    async def has(table):
+        cur = await db.execute(f"SELECT 1 FROM {table} WHERE post_id = ? AND user_id = ?",
+                               (row["id"], viewer_id))
+        return await cur.fetchone() is not None
+    return {
+        "id": row["id"],
+        "author": {
+            "id": author["id"],
+            "username": author["username"],
+            "display_name": author["display_name"],
+            "avatar_path": author["avatar_path"],
+        },
+        "body": row["body"],
+        "media": media,
+        "reply_to_id": row["reply_to_id"],
+        "quote_id": row["quote_id"],
+        "quote": quote,
+        "created_at_ms": row["created_at_ms"],
+        "edited_at_ms": row["edited_at_ms"],
+        "reposter_id": reposter_id,
+        "like_count": await _count_post(db, "social_likes", row["id"]),
+        "repost_count": await _count_post(db, "social_reposts", row["id"]),
+        "reply_count": await _count_replies(db, row["id"]),
+        "bookmark_count": await _count_post(db, "social_bookmarks", row["id"]),
+        "liked": await has("social_likes"),
+        "reposted": await has("social_reposts"),
+        "bookmarked": await has("social_bookmarks"),
+    }
+
+
+async def _count_replies(db: aiosqlite.Connection, post_id: int) -> int:
+    cursor = await db.execute(
+        "SELECT COUNT(*) AS c FROM social_posts WHERE reply_to_id = ? AND is_deleted = 0",
+        (post_id,)
+    )
+    return (await cursor.fetchone())["c"] or 0
+
+
+async def _serialize_post_rows(db: aiosqlite.Connection, rows: List[dict],
+                               viewer_id: int, reposters: List[int] = None) -> List[dict]:
+    out = []
+    blocked = await _blocked_user_ids(db, viewer_id)
+    for i, row in enumerate(rows):
+        if row["author_id"] in blocked:
+            continue
+        if row.get("reposter_id") is not None and row["reposter_id"] in blocked:
+            continue
+        reposter = row.get("reposter_id") if row.get("reposter_id") is not None else ((reposters or [None])[i] if reposters else None)
+        out.append(await _serialize_post(db, row, viewer_id, reposter))
+    return out
+
+
+async def _extract_mentions(body: str) -> List[str]:
+    return list(dict.fromkeys(re.findall(r"@([A-Za-z0-9_]{1,30})", body or "")))
+
+
+async def _extract_hashtags(body: str) -> List[str]:
+    return list(dict.fromkeys(re.findall(r"#([A-Za-z0-9_]{1,100})", body or "")))
+
+
+async def _notify_social(db: aiosqlite.Connection, user_id: int, actor_id: int,
+                         ntype: str, post_id: int = None):
+    if user_id == actor_id:
+        return
+    if await _block_exists(db, user_id, actor_id):
+        return
+    await db.execute(
+        "INSERT INTO social_notifications (user_id, actor_id, type, post_id, created_at_ms) "
+        "VALUES (?,?,?,?,?)",
+        (user_id, actor_id, ntype, post_id, int(time.time() * 1000))
+    )
+
+
+async def _load_post(db: aiosqlite.Connection, post_id: int, viewer_id: int) -> dict:
+    cur = await db.execute("SELECT * FROM social_posts WHERE id = ?", (post_id,))
+    row = await cur.fetchone()
+    if not row or row["is_deleted"]:
+        raise HTTPException(404, "Post not found")
+    if await _block_exists(db, viewer_id, row["author_id"]):
+        raise HTTPException(403, "You cannot view posts from this user")
+    return await _serialize_post(db, dict(row), viewer_id)
+
+
+async def _social_author_ids(db: aiosqlite.Connection, uid: int) -> List[int]:
+    ids = {uid}
+    cursor = await db.execute("SELECT following_id FROM follows WHERE follower_id = ?", (uid,))
+    for row in await cursor.fetchall():
+        ids.add(row["following_id"])
+    return list(ids)
+
+
+@app.post("/api/social/posts")
+async def create_social_post_rest(
+    body: str = Query("", max_length=MAX_POST_LENGTH),
+    media_json: str = Query(""),
+    reply_to_id: int = Query(None),
+    quote_id: int = Query(None),
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    body = (body or "").strip()
+    if not body and not media_json:
+        raise HTTPException(400, "Post cannot be empty")
+    media = []
+    if media_json:
+        try:
+            media = json.loads(media_json)
+        except Exception:
+            raise HTTPException(400, "Invalid media payload")
+        if not isinstance(media, list) or len(media) > MAX_POST_MEDIA:
+            raise HTTPException(400, f"A post can contain at most {MAX_POST_MEDIA} media files")
+        for m in media:
+            path = m.get("file_path", "")
+            if not str(path).startswith(f"uploads/{user['username']}/"):
+                raise HTTPException(403, "You can only attach files you uploaded")
+    db = await get_db()
+    try:
+        if reply_to_id:
+            await _ensure_interactable_post(db, reply_to_id, user["id"])
+        if quote_id:
+            await _ensure_interactable_post(db, quote_id, user["id"])
+        cur = await db.execute(
+            "INSERT INTO social_posts (author_id, body, media_json, reply_to_id, quote_id, "
+            "created_at_ms) VALUES (?,?,?,?,?,?)",
+            (user["id"], body, media_json or None, reply_to_id, quote_id,
+             int(time.time() * 1000))
+        )
+        post_id = cur.lastrowid
+        await db.commit()
+        schedule_db_sync()
+        # Notify reply target + mentioned users.
+        if reply_to_id:
+            rt = await db.execute("SELECT author_id FROM social_posts WHERE id = ?", (reply_to_id,))
+            rt_row = await rt.fetchone()
+            if rt_row:
+                await _notify_social(db, rt_row["author_id"], user["id"], "reply", post_id)
+        for handle in await _extract_mentions(body):
+            mc = await db.execute("SELECT id FROM users WHERE lower(username) = lower(?)", (handle,))
+            mrow = await mc.fetchone()
+            if mrow:
+                await _notify_social(db, mrow["id"], user["id"], "mention", post_id)
+        await db.commit()
+        post = await _load_post(db, post_id, user["id"])
+        return {"post": post}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/posts/{post_id}")
+async def get_post_rest(post_id: int, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        return {"post": await _load_post(db, post_id, user["id"])}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/posts/{post_id}/replies")
+async def get_replies_rest(post_id: int, limit: int = Query(50, le=100),
+                           token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        await _ensure_interactable_post(db, post_id, user["id"])
+        cur = await db.execute(
+            "SELECT * FROM social_posts WHERE reply_to_id = ? AND is_deleted = 0 "
+            "ORDER BY created_at_ms ASC LIMIT ?", (post_id, limit))
+        rows = [dict(r) for r in await cur.fetchall()]
+        return {"replies": await _serialize_post_rows(db, rows, user["id"])}
+    finally:
+        await db.close()
+
+
+@app.delete("/api/social/posts/{post_id}")
+async def delete_social_post_rest(post_id: int, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT author_id FROM social_posts WHERE id = ?", (post_id,))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Post not found")
+        if row["author_id"] != user["id"]:
+            raise HTTPException(403, "You can only delete your own posts")
+        await db.execute("UPDATE social_posts SET is_deleted = 1 WHERE id = ?", (post_id,))
+        await db.commit()
+        schedule_db_sync()
+        return {"status": "deleted", "post_id": post_id}
+    finally:
+        await db.close()
+
+
+@app.post("/api/social/posts/{post_id}/like")
+async def toggle_like_rest(post_id: int, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        await _ensure_interactable_post(db, post_id, user["id"])
+        liked = await _toggle_row(db, "social_likes", post_id, user["id"])
+        await db.commit()
+        if liked:
+            cur = await db.execute("SELECT author_id FROM social_posts WHERE id = ?", (post_id,))
+            row = await cur.fetchone()
+            await _notify_social(db, row["author_id"], user["id"], "like", post_id)
+            await db.commit()
+        return {"liked": liked, "like_count": await _count_post(db, "social_likes", post_id)}
+    finally:
+        await db.close()
+
+
+@app.post("/api/social/posts/{post_id}/repost")
+async def toggle_repost_rest(post_id: int, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        await _ensure_interactable_post(db, post_id, user["id"])
+        reposted = await _toggle_row(db, "social_reposts", post_id, user["id"])
+        await db.commit()
+        if reposted:
+            cur = await db.execute("SELECT author_id FROM social_posts WHERE id = ?", (post_id,))
+            row = await cur.fetchone()
+            await _notify_social(db, row["author_id"], user["id"], "repost", post_id)
+            await db.commit()
+        return {"reposted": reposted, "repost_count": await _count_post(db, "social_reposts", post_id)}
+    finally:
+        await db.close()
+
+
+@app.post("/api/social/posts/{post_id}/bookmark")
+async def toggle_bookmark_rest(post_id: int, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        await _ensure_interactable_post(db, post_id, user["id"])
+        bookmarked = await _toggle_row(db, "social_bookmarks", post_id, user["id"])
+        await db.commit()
+        return {"bookmarked": bookmarked}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/feed")
+async def get_social_feed_rest(
+    feed: str = Query("home"),
+    cursor: int = Query(-1),
+    limit: int = Query(30, le=100),
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        blocked = await _blocked_user_ids(db, user["id"])
+        if feed == "home":
+            author_ids = await _social_author_ids(db, user["id"])
+            rows = []
+            if author_ids:
+                placeholders = ",".join("?" * len(author_ids))
+                cur = await db.execute(
+                    f"SELECT * FROM social_posts WHERE author_id IN ({placeholders}) "
+                    f"AND is_deleted = 0 ORDER BY created_at_ms DESC LIMIT ?",
+                    author_ids + [limit * 3])
+                rows = [dict(r) for r in await cur.fetchall()]
+            # Reposts by followed accounts + self, merged with original posts.
+            reposter_ids = list(author_ids)
+            if reposter_ids:
+                ph = ",".join("?" * len(reposter_ids))
+                cur = await db.execute(
+                    f"SELECT p.*, r.user_id AS reposter_id, r.created_at_ms AS reposted_at_ms "
+                    f"FROM social_reposts r JOIN social_posts p ON p.id = r.post_id "
+                    f"WHERE r.user_id IN ({ph}) AND p.is_deleted = 0",
+                    reposter_ids)
+                reposts = [dict(r) for r in await cur.fetchall()]
+                rows = rows + reposts
+                rows = sorted(rows, key=lambda r: r.get("reposted_at_ms") or r["created_at_ms"], reverse=True)
+        elif feed == "explore":
+            cur = await db.execute(
+                "SELECT * FROM social_posts WHERE is_deleted = 0 "
+                "ORDER BY created_at_ms DESC LIMIT ?", (limit * 3,))
+            rows = [dict(r) for r in await cur.fetchall()]
+        else:
+            raise HTTPException(400, "Unknown feed")
+        if cursor >= 0:
+            rows = [r for r in rows if r["created_at_ms"] < cursor]
+        rows = rows[:limit]
+        posts = await _serialize_post_rows(db, rows, user["id"])
+        posts.sort(key=lambda p: p["created_at_ms"], reverse=True)
+        return {"posts": posts, "cursor": posts[-1]["created_at_ms"] if posts else None}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/users/{username}/posts")
+async def get_user_posts_rest(username: str, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        u = await db.execute("SELECT id FROM users WHERE lower(username) = lower(?)", (username,))
+        urow = await u.fetchone()
+        if not urow:
+            raise HTTPException(404, "User not found")
+        if await _block_exists(db, user["id"], urow["id"]):
+            raise HTTPException(403, "Content is not available")
+        cur = await db.execute(
+            "SELECT * FROM social_posts WHERE author_id = ? AND is_deleted = 0 "
+            "ORDER BY created_at_ms DESC LIMIT 100", (urow["id"],))
+        rows = [dict(r) for r in await cur.fetchall()]
+        return {"posts": await _serialize_post_rows(db, rows, user["id"])}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/profile/{username}")
+async def get_social_profile_rest(username: str, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id FROM users WHERE lower(username) = lower(?)", (username,))
+        urow = await cur.fetchone()
+        if not urow:
+            raise HTTPException(404, "User not found")
+        target_id = urow["id"]
+        blocked = await _block_exists(db, user["id"], target_id)
+        if blocked:
+            raise HTTPException(403, "Content is not available")
+        prof = await _social_user(db, target_id)
+        followers = await db.execute("SELECT COUNT(*) AS c FROM follows WHERE following_id = ?", (target_id,))
+        following = await db.execute("SELECT COUNT(*) AS c FROM follows WHERE follower_id = ?", (target_id,))
+        is_follow = await db.execute("SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?",
+                                     (user["id"], target_id))
+        posts = await db.execute("SELECT COUNT(*) AS c FROM social_posts WHERE author_id = ? AND is_deleted = 0",
+                                 (target_id,))
+        return {
+            "profile": {
+                **prof,
+                "is_self": target_id == user["id"],
+                "is_following": await is_follow.fetchone() is not None,
+                "followers_count": (await followers.fetchone())["c"],
+                "following_count": (await following.fetchone())["c"],
+                "posts_count": (await posts.fetchone())["c"],
+            }
+        }
+    finally:
+        await db.close()
+
+
+@app.post("/api/social/users/{username}/follow")
+async def toggle_follow_rest(username: str, token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT id FROM users WHERE lower(username) = lower(?)", (username,))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "User not found")
+        target_id = row["id"]
+        if target_id == user["id"]:
+            raise HTTPException(400, "You cannot follow yourself")
+        if await _block_exists(db, user["id"], target_id):
+            raise HTTPException(403, "You cannot interact with this user")
+        now = int(time.time() * 1000)
+        existing = await db.execute("SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?",
+                                    (user["id"], target_id))
+        if await existing.fetchone():
+            await db.execute("DELETE FROM follows WHERE follower_id = ? AND following_id = ?",
+                             (user["id"], target_id))
+            await db.commit()
+            return {"following": False}
+        await db.execute("INSERT INTO follows (follower_id, following_id, created_at_ms) VALUES (?,?,?)",
+                         (user["id"], target_id, now))
+        await _notify_social(db, target_id, user["id"], "follow")
+        await db.commit()
+        return {"following": True}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/search")
+async def social_search_rest(q: str = Query("", max_length=100),
+                             token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    q = (q or "").strip()
+    db = await get_db()
+    try:
+        blocked = await _blocked_user_ids(db, user["id"])
+        users = []
+        posts = []
+        if q:
+            like = f"%{q}%"
+            ucur = await db.execute(
+                "SELECT id, username, display_name, avatar_path, bio FROM users "
+                "WHERE id != ? AND (lower(username) LIKE ? OR lower(display_name) LIKE ?) LIMIT 30",
+                (user["id"], like.lower(), like.lower()))
+            for r in await ucur.fetchall():
+                if r["id"] in blocked:
+                    continue
+                users.append({
+                    "id": r["id"], "username": r["username"], "display_name": r["display_name"],
+                    "avatar_path": r["avatar_path"], "bio": r["bio"],
+                    "is_following": False,
+                })
+            pcur = await db.execute(
+                "SELECT * FROM social_posts WHERE is_deleted = 0 AND body LIKE ? "
+                "ORDER BY created_at_ms DESC LIMIT 50", (like,))
+            rows = [dict(r) for r in await pcur.fetchall() if r["author_id"] not in blocked]
+            posts = await _serialize_post_rows(db, rows, user["id"])
+        return {"users": users, "posts": posts}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/suggestions")
+async def social_suggestions_rest(limit: int = Query(5, le=20),
+                                  token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        blocked = await _blocked_user_ids(db, user["id"])
+        cur = await db.execute(
+            "SELECT u.id, u.username, u.display_name, u.avatar_path, u.bio, "
+            "(SELECT COUNT(*) FROM follows f WHERE f.following_id = u.id) AS followers_count "
+            "FROM users u LEFT JOIN follows f ON f.follower_id = ? AND f.following_id = u.id "
+            "WHERE u.id != ? AND u.id NOT IN (SELECT following_id FROM follows WHERE follower_id = ?) "
+            "ORDER BY followers_count DESC, u.username LIMIT ?",
+            (user["id"], user["id"], user["id"], limit)
+        )
+        out = []
+        for r in await cur.fetchall():
+            if r["id"] in blocked:
+                continue
+            out.append({
+                "id": r["id"], "username": r["username"], "display_name": r["display_name"],
+                "avatar_path": r["avatar_path"], "bio": r["bio"], "followers_count": r["followers_count"],
+                "is_following": False,
+            })
+        return {"users": out}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/trending")
+async def social_trending_rest(token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        since = int((time.time() - 7 * 24 * 3600) * 1000)
+        cur = await db.execute(
+            "SELECT body FROM social_posts WHERE is_deleted = 0 AND created_at_ms >= ?", (since,))
+        counts = {}
+        for row in await cur.fetchall():
+            for tag in await _extract_hashtags(row["body"]):
+                t = tag.lower()
+                counts[t] = counts.get(t, 0) + 1
+        top = [{"tag": k, "count": v} for k, v in counts.items()]
+        top.sort(key=lambda x: (-x["count"], x["tag"]))
+        return {"trending": top[:10]}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/bookmarks")
+async def social_bookmarks_rest(limit: int = Query(50, le=100),
+                                token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT p.* FROM social_bookmarks b JOIN social_posts p ON p.id = b.post_id "
+            "WHERE b.user_id = ? AND p.is_deleted = 0 ORDER BY b.created_at_ms DESC LIMIT ?",
+            (user["id"], limit))
+        rows = [dict(r) for r in await cur.fetchall()]
+        return {"posts": await _serialize_post_rows(db, rows, user["id"])}
+    finally:
+        await db.close()
+
+
+@app.get("/api/social/notifications")
+async def social_notifications_rest(token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        blocked = await _blocked_user_ids(db, user["id"])
+        cur = await db.execute(
+            "SELECT n.*, u.username AS actor_username, u.display_name AS actor_display_name, "
+            "u.avatar_path AS actor_avatar_path FROM social_notifications n JOIN users u ON u.id = n.actor_id "
+            "WHERE n.user_id = ? ORDER BY n.created_at_ms DESC LIMIT 100", (user["id"],))
+        out = []
+        for r in await cur.fetchall():
+            if r["actor_id"] in blocked:
+                continue
+            out.append({
+                "id": r["id"], "type": r["type"], "post_id": r["post_id"],
+                "created_at_ms": r["created_at_ms"], "read": bool(r["read"]),
+                "actor": {"id": r["actor_id"], "username": r["actor_username"],
+                          "display_name": r["actor_display_name"], "avatar_path": r["actor_avatar_path"]},
+            })
+        return {"notifications": out}
+    finally:
+        await db.close()
+
+
+@app.post("/api/social/notifications/read")
+async def mark_notifications_read_rest(token: str = Header(..., alias="X-Auth-Token")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    db = await get_db()
+    try:
+        await db.execute("UPDATE social_notifications SET read = 1 WHERE user_id = ?", (user["id"],))
+        await db.commit()
+        return {"status": "read"}
+    finally:
+        await db.close()
+
+
+# ------------------------------------------------------------------------
+# Backup administration
+# ------------------------------------------------------------------------
+def _check_backup_key(key: str):
+    required = BACKUP_ADMIN_KEY.strip()
+    if required and key != required:
+        raise HTTPException(403, "Invalid backup admin key")
+
+
+@app.get("/api/admin/backups")
+async def admin_backups(token: str = Header(..., alias="X-Auth-Token"),
+                        x_backup_key: str = Header(None, alias="X-Backup-Key")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    _check_backup_key(x_backup_key or "")
+    return {"backups": await asyncio.to_thread(list_backups), "offline": False}
+
+
+@app.post("/api/admin/backups/create")
+async def admin_create_backup(token: str = Header(..., alias="X-Auth-Token"),
+                              x_backup_key: str = Header(None, alias="X-Backup-Key")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    _check_backup_key(x_backup_key or "")
+    path = await asyncio.to_thread(create_timestamped_backup, DATABASE_URL, "manual")
+    if not path:
+        raise HTTPException(503, "Backup unavailable (storage offline or failure)")
+    return {"status": "created", "path": path}
+
+
+@app.post("/api/admin/backups/{backup_prefix:path}/restore")
+async def admin_restore_backup(backup_prefix: str, token: str = Header(..., alias="X-Auth-Token"),
+                               x_backup_key: str = Header(None, alias="X-Backup-Key")):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    _check_backup_key(x_backup_key or "")
+    try:
+        count = await asyncio.to_thread(restore_backup, DATABASE_URL, backup_prefix)
+    except StorageUnavailableError as e:
+        raise HTTPException(503, str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Restore failed: {e}")
+    return {"status": "restored", "files": count, "restart_recommended": True}
+
+
+# ------------------------------------------------------------------------
 # Messages (REST fallbacks for reliable edit/delete/receipts)
 # ------------------------------------------------------------------------
 async def _get_message_row(db: aiosqlite.Connection, mid: int):
@@ -2057,8 +2865,12 @@ async def upload_chunk(
             with open(assembled_path, 'rb') as f:
                 full_data = f.read()
             # Blocking bucket write happens off the event loop
-            await asyncio.to_thread(store_file, remote_path, full_data)
-            del full_data
+            try:
+                await asyncio.to_thread(store_file, remote_path, full_data)
+            except StorageUnavailableError:
+                raise HTTPException(503, "File storage is unavailable")
+            finally:
+                del full_data
 
         finally:
             shutil.rmtree(session_dir, ignore_errors=True)
@@ -2095,20 +2907,30 @@ async def download_file(
     if '..' in file_path or '\\' in file_path:
         raise HTTPException(400, "Invalid path")
 
-    # Avatars are public profile data. Chat files belong to a conversation, so
-    # a user blocked out of it must not be able to keep downloading the files.
+    # Avatars are public profile data. Social attachments are linked to a post.
+    # Chat files belong to a conversation, so a user blocked out of it must not
+    # be able to keep downloading those files.
+    social_media = False
     if not file_path.startswith("avatars/"):
         db = await get_db()
         try:
-            cursor = await db.execute(
-                "SELECT conversation_id FROM messages WHERE file_path = ? ORDER BY id DESC LIMIT 1",
-                (file_path,)
+            # Social-media attachment: any signed-in user may fetch a post's media.
+            sp = await db.execute(
+                "SELECT 1 FROM social_posts WHERE is_deleted = 0 AND media_json LIKE ? LIMIT 1",
+                (f'%{file_path}%',)
             )
-            row = await cursor.fetchone()
-            if not row:
-                raise HTTPException(404, "File not found")
-            if not await user_in_conversation(db, user['id'], row["conversation_id"]):
-                raise HTTPException(403, "You can no longer access this file")
+            if await sp.fetchone() is not None:
+                social_media = True
+            if not social_media:
+                cursor = await db.execute(
+                    "SELECT conversation_id FROM messages WHERE file_path = ? ORDER BY id DESC LIMIT 1",
+                    (file_path,)
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    raise HTTPException(404, "File not found")
+                if not await user_in_conversation(db, user['id'], row["conversation_id"]):
+                    raise HTTPException(403, "You can no longer access this file")
         finally:
             await db.close()
 

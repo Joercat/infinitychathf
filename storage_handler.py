@@ -467,6 +467,219 @@ def upload_database(local_path: str) -> bool:
                     pass
 
 
+# ------------------------------------------------------------------------
+# Backups (database + all data files) to a separate folder in the bucket
+# ------------------------------------------------------------------------
+BACKUP_DIR = "backups"
+BACKUP_RETENTION_HOURS = int(os.environ.get("BACKUP_RETENTION_HOURS", "48"))
+BACKUP_RETENTION_DAILY = int(os.environ.get("BACKUP_RETENTION_DAILY", "7"))
+
+
+def _utc_slug() -> str:
+    return time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime())
+
+
+def _snapshot_db_bytes(local_path: str) -> bytes:
+    """Take a consistent SQLite snapshot and return its bytes.
+
+    Uses the sqlite online backup API so WAL-mode writes are not lost and the
+    copied file is never a torn/corrupt snapshot.
+    """
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(f"Database not found at {local_path}")
+    fd, tmp = tempfile.mkstemp(suffix=".db", dir=os.path.dirname(os.path.abspath(local_path)) or ".")
+    os.close(fd)
+    os.unlink(tmp)
+    src = sqlite3.connect(f"file:{local_path}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(tmp)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    with open(tmp, "rb") as f:
+        data = f.read()
+    try:
+        os.unlink(tmp)
+    except Exception:
+        pass
+    if not data:
+        raise IOError("Database snapshot was empty")
+    return data
+
+
+def _copy_live_files_to_backup(backup_prefix: str) -> int:
+    """Copy current data files (uploads/avatars/database) into a backup folder.
+
+    Existing backups under backups/ are excluded so hourly backups don't grow
+    exponentially by copying previous backups.
+    """
+    copied = 0
+    for path in list_files(""):
+        if path == DB_BUCKET_PATH or path == "database/infinitychat.db":
+            continue  # database is saved separately from the snapshot
+        if path.startswith(BACKUP_DIR + "/"):
+            continue
+        try:
+            data = retrieve_file(path)  # decrypted to plaintext
+            store_file(f"{backup_prefix}/{path}", data, encrypt=True)
+            copied += 1
+        except Exception as e:
+            logger.warning(f"⚠️  Backup skipped {path}: {e}")
+    return copied
+
+
+def list_backups() -> List[Dict[str, Any]]:
+    """Return metadata for all timestamped backups (newest first)."""
+    if _OFFLINE:
+        return []
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        for path in list_files(BACKUP_DIR):
+            parts = path.split("/")
+            if len(parts) < 3:
+                continue
+            category, stamp = parts[0], parts[1]
+            if stamp not in out:
+                out[stamp] = {
+                    "path": f"{category}/{stamp}",
+                    "category": category,
+                    "timestamp": stamp,
+                    "file_count": 0,
+                    "size": 0,
+                    "created": None,
+                    "has_database": False,
+                }
+            info = get_file_info(path)
+            out[stamp]["file_count"] += 1
+            out[stamp]["size"] += int(info.get("size") or 0) if info else 0
+            out[stamp]["created"] = info.get("created") if info else None
+            if path.endswith("infinitychat.db"):
+                out[stamp]["has_database"] = True
+    except Exception as e:
+        logger.error(f"Failed to list backups: {e}")
+    return sorted(out.values(), key=lambda x: x["timestamp"], reverse=True)
+
+
+def create_timestamped_backup(local_path: str, category: str = "hourly") -> Optional[str]:
+    """Create a full point-in-time backup of the DB + data files.
+
+    Returns the backup prefix (e.g. backups/hourly/2026-01-01_00-00-00) or None
+    when running offline.
+    """
+    if _OFFLINE:
+        logger.info("📭 Storage offline - skipping backup")
+        return None
+    with _db_sync_lock:
+        prefix = f"{BACKUP_DIR}/{category}/{_utc_slug()}"
+        try:
+            db_bytes = _snapshot_db_bytes(local_path)
+            store_file(f"{prefix}/database/infinitychat.db", db_bytes, encrypt=True)
+            copied = _copy_live_files_to_backup(prefix)
+            logger.info(f"💾 Backup created: {prefix} (db + {copied} files)")
+            prune_backups()
+            return prefix
+        except Exception as e:
+            logger.error(f"❌ Backup failed: {e}")
+            return None
+
+
+def prune_backups():
+    """Keep the newest N hourly backups and the last daily marker per day."""
+    if _OFFLINE:
+        return
+    try:
+        hourly = sorted([b for b in list_backups() if b["category"] == "hourly"],
+                        key=lambda b: b["timestamp"], reverse=True)
+        for b in hourly[BACKUP_RETENTION_HOURS:]:
+            _delete_tree(b["path"])
+        # Keep at most one backup per calendar day (the newest of that day),
+        # for a longer daily retention window.
+        seen_days = set()
+        for b in hourly[:BACKUP_RETENTION_HOURS]:
+            day = b["timestamp"][:10]
+            if day not in seen_days:
+                seen_days.add(day)
+        daily = sorted([b for b in hourly if b["timestamp"][:10] not in seen_days],
+                       key=lambda b: b["timestamp"], reverse=True)
+        for b in daily[BACKUP_RETENTION_DAILY:]:
+            _delete_tree(b["path"])
+    except Exception as e:
+        logger.error(f"Failed to prune backups: {e}")
+
+
+def _delete_tree(prefix: str):
+    try:
+        for path in list_files(prefix):
+            try:
+                delete_file(path)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Failed to delete backup tree {prefix}: {e}")
+
+
+def restore_backup(local_db_path: str, backup_prefix: str) -> int:
+    """Restore a database + data files from a backup prefix.
+
+    Returns the number of files restored. WAL/SHM sidecars are removed first so
+    the server reads the restored snapshot on the next request.
+    """
+    if _OFFLINE:
+        raise StorageUnavailableError("Storage is offline - nothing to restore")
+    if not backup_prefix or backup_prefix.startswith("/") or ".." in backup_prefix.split("/"):
+        raise ValueError("Invalid backup prefix")
+    files = list_files(backup_prefix)
+    if not files:
+        raise FileNotFoundError("Backup not found")
+    restored = 0
+    for path in files:
+        data = retrieve_file(path)  # decrypt
+        rel = path[len(backup_prefix) + 1:]
+        if rel == "database/infinitychat.db":
+            os.makedirs(os.path.dirname(local_db_path) or ".", exist_ok=True)
+            with open(local_db_path, "wb") as f:
+                f.write(data)
+            for suffix in ("-wal", "-shm"):
+                try:
+                    if os.path.exists(local_db_path + suffix):
+                        os.unlink(local_db_path + suffix)
+                except Exception:
+                    pass
+        else:
+            store_file(rel, data, encrypt=True)  # re-encrypt with current key
+        restored += 1
+    logger.info(f"♻️  Restored {restored} file(s) from {backup_prefix}")
+    return restored
+
+
+_backup_loop_started = False
+
+
+def start_backup_loop(local_path: str, interval: int = 3600):
+    """Background thread that creates an hourly full backup."""
+    global _backup_loop_started
+    if _OFFLINE:
+        logger.info("📭 Hourly backup skipped (storage offline)")
+        return
+    if _backup_loop_started:
+        return
+
+    def _loop():
+        while True:
+            time.sleep(interval)
+            try:
+                create_timestamped_backup(local_path, "hourly")
+            except Exception as e:
+                logger.warning(f"⚠️  Hourly backup failed: {e}")
+
+    _backup_loop_started = True
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    logger.info(f"🕐 Hourly backup thread started (every {interval}s)")
+
 def start_db_sync(local_path: str):
     """
     Start background thread that periodically uploads the database to bucket.
@@ -504,5 +717,6 @@ __all__ = [
     'store_file_stream', 'retrieve_file_stream',
     'get_storage_stats', 'create_backup', 'close',
     'download_database', 'upload_database', 'start_db_sync',
-    'DB_BUCKET_PATH', 'StorageUnavailableError'
+    'list_backups', 'create_timestamped_backup', 'restore_backup',
+    'start_backup_loop', 'DB_BUCKET_PATH', 'StorageUnavailableError'
 ]

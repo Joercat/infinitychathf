@@ -91,7 +91,7 @@ async def wait_events(clients, mtype, timeout=6):
 async def main():
     async with httpx.AsyncClient(timeout=15) as http:
         r = await http.get(BASE + "/api/health")
-        check(r.status_code == 200 and r.json()["version"] == "2.0.0", "health / version", r.text[:100])
+        check(r.status_code == 200 and r.json()["version"] == "3.0.0", "health / version", r.text[:100])
 
         # ---- signup ----
         alice = Client("alice")

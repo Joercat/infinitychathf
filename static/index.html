@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=5">
+    <link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
     <div id="auth-screen" class="screen active">
@@ -178,6 +178,9 @@
                         <button id="conv-options-btn" class="btn-icon" aria-label="Chat options" title="Chat options">
                             <i class="fas fa-ellipsis-h"></i>
                         </button>
+                        <button id="social-btn" class="btn-icon" aria-label="Social feed" title="Social feed">
+                            <i class="fas fa-hashtag"></i>
+                        </button>
                         <button id="settings-btn" class="btn-icon" aria-label="Settings" title="Settings">
                             <i class="fas fa-cog"></i>
                         </button>
@@ -288,6 +291,173 @@
         </div>
     </div>
 
+    <!-- ================= SOCIAL / TWITTER-LIKE PAGE ================= -->
+    <div id="social-screen" class="screen">
+        <div class="social-app">
+            <header class="social-topbar">
+                <button id="social-back-btn" class="btn-icon" aria-label="Back to chat" title="Back to chat">
+                    <i class="fas fa-arrow-left"></i>
+                </button>
+                <div class="social-topbar-title">
+                    <strong id="social-page-title">Home</strong>
+                    <span id="social-page-sub">Posts from people you follow</span>
+                </div>
+                <div class="social-topbar-search">
+                    <i class="fas fa-search"></i>
+                    <input id="social-search-input" type="search" placeholder="Search posts or people" autocomplete="off">
+                    <button id="social-search-clear" class="btn-icon btn-icon-sm hidden" aria-label="Clear search">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <button id="social-backups-btn" class="btn-icon" aria-label="Backups" title="Backups">
+                    <i class="fas fa-clock-rotate-left"></i>
+                </button>
+            </header>
+
+            <div class="social-body">
+                <aside class="social-nav">
+                    <div class="social-nav-user">
+                        <div class="user-avatar social-nav-avatar">
+                            <img id="social-me-avatar" class="hidden" alt="me">
+                            <span id="social-me-avatar-ph" class="social-nav-initial"></span>
+                        </div>
+                        <div class="social-nav-userinfo">
+                            <strong id="social-me-name">…</strong>
+                            <span id="social-me-username" class="text-secondary">@…</span>
+                        </div>
+                    </div>
+                    <nav class="social-nav-links">
+                        <button class="social-nav-link active" data-social-view="home">
+                            <i class="fas fa-home"></i><span>Home</span>
+                        </button>
+                        <button class="social-nav-link" data-social-view="explore">
+                            <i class="fas fa-compass"></i><span>Explore</span>
+                        </button>
+                        <button class="social-nav-link" data-social-view="notifications">
+                            <i class="fas fa-bell"></i><span>Notifications</span>
+                            <span id="social-unread-badge" class="badge hidden">0</span>
+                        </button>
+                        <button class="social-nav-link" data-social-view="bookmarks">
+                            <i class="fas fa-bookmark"></i><span>Bookmarks</span>
+                        </button>
+                        <button class="social-nav-link" data-social-view="profile">
+                            <i class="fas fa-user-circle"></i><span>My Profile</span>
+                        </button>
+                    </nav>
+                    <button id="social-compose-nav-btn" class="btn btn-primary btn-block social-compose-btn">
+                        <i class="fas fa-feather"></i> Post
+                    </button>
+                    <div class="social-nav-footer">
+                        <button id="social-logout-btn" class="btn btn-ghost btn-block">
+                            <i class="fas fa-sign-out-alt"></i> Log out
+                        </button>
+                    </div>
+                </aside>
+
+                <main class="social-main">
+                    <div id="social-compose" class="social-compose">
+                        <div class="user-avatar">
+                            <img id="social-compose-avatar" class="hidden" alt="me">
+                            <span id="social-compose-avatar-ph"></span>
+                        </div>
+                        <div class="social-compose-main">
+                            <textarea id="social-post-input" class="social-post-input"
+                                      placeholder="What is happening?!"
+                                      maxlength="28000" rows="2"></textarea>
+                            <div class="social-compose-tools">
+                                <label class="btn-icon" title="Upload media" for="social-media-input">
+                                    <i class="fas fa-image"></i>
+                                </label>
+                                <label class="btn-icon" title="Emoji" for="social-post-emoji">
+                                    <i class="fas fa-smile"></i>
+                                </label>
+                                <span id="social-post-count" class="social-post-count"></span>
+                                <button id="social-post-btn" class="btn btn-primary btn-sm" disabled>
+                                    <i class="fas fa-feather"></i> Post
+                                </button>
+                            </div>
+                            <div id="social-media-preview" class="social-media-preview hidden"></div>
+                        </div>
+                    </div>
+                    <div id="social-feed" class="social-feed">
+                        <div class="social-feed-empty hidden">
+                            <i class="fas fa-feather"></i>
+                            <h3>Nothing here yet</h3>
+                            <p>Follow people or make the first post.</p>
+                        </div>
+                    </div>
+                    <div id="social-loading" class="social-loading hidden"><div class="spinner"></div></div>
+                </main>
+
+                <aside class="social-rail">
+                    <section class="social-card social-trending">
+                        <h3><i class="fas fa-fire"></i> Trending</h3>
+                        <div id="social-trending-list" class="social-trending-list"></div>
+                    </section>
+                    <section class="social-card social-suggest">
+                        <h3><i class="fas fa-user-plus"></i> Who to follow</h3>
+                        <div id="social-suggest-list" class="social-suggest-list"></div>
+                    </section>
+                </aside>
+            </div>
+
+            <!-- Hidden inputs for composer media and emoji -->
+            <input type="file" id="social-media-input" class="hidden" multiple accept="image/*,video/*" style="display:none">
+            <input type="text" id="social-post-emoji" class="hidden" style="display:none">
+        </div>
+    </div>
+
+    <!-- Compose / reply / quote modal -->
+    <div id="social-compose-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="social-compose-modal"></div>
+        <div class="modal-container modal-md">
+            <div class="modal-header">
+                <h2 id="social-compose-modal-title"><i class="fas fa-feather"></i> Compose</h2>
+                <button class="btn-icon" data-close="social-compose-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div id="social-compose-modal-context" class="social-reply-context hidden"></div>
+                <textarea id="social-compose-modal-input" class="social-post-input"
+                          placeholder="What is happening?!" maxlength="28000" rows="5"></textarea>
+                <div id="social-compose-modal-media-preview" class="social-media-preview hidden"></div>
+                <div class="social-compose-tools">
+                    <label class="btn-icon" title="Upload media" for="social-compose-modal-media">
+                        <i class="fas fa-image"></i>
+                    </label>
+                    <span id="social-compose-modal-count" class="social-post-count"></span>
+                    <button id="social-compose-modal-submit" class="btn btn-primary btn-sm">
+                        <i class="fas fa-feather"></i> Post
+                    </button>
+                </div>
+                <input type="file" id="social-compose-modal-media" class="hidden" multiple
+                       accept="image/*,video/*" style="display:none">
+            </div>
+        </div>
+    </div>
+
+    <!-- Backups admin modal -->
+    <div id="backups-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="backups-modal"></div>
+        <div class="modal-container modal-md">
+            <div class="modal-header">
+                <h2><i class="fas fa-clock-rotate-left"></i> Backups</h2>
+                <button class="btn-icon" data-close="backups-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-secondary">Automated full backups run every hour. Restoring overwrites the live database and files — create a fresh backup first when possible.</p>
+                <div class="backups-key-row">
+                    <input type="password" id="backups-admin-key" class="form-input" placeholder="Backup admin key (leave blank in dev mode)">
+                    <button id="backups-refresh-btn" class="btn btn-secondary btn-sm"><i class="fas fa-sync"></i> Refresh</button>
+                    <button id="backups-create-btn" class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> Backup Now</button>
+                </div>
+                <div id="backups-list" class="backups-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" data-close="backups-modal">Close</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal hidden">
         <div class="modal-backdrop" data-close="settings-modal"></div>
@@ -323,6 +493,24 @@
                         </label>
                         <div class="input-wrapper">
                             <input type="text" id="settings-username" class="form-input" disabled>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-bio">Bio <span class="label-hint">(shown on your social profile)</span></label>
+                        <div class="input-wrapper">
+                            <textarea id="settings-bio" class="form-input" maxlength="200" rows="2" placeholder="Tell people about yourself"></textarea>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-location">Location</label>
+                        <div class="input-wrapper">
+                            <input type="text" id="settings-location" class="form-input" maxlength="80" placeholder="City, region">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-website">Website</label>
+                        <div class="input-wrapper">
+                            <input type="text" id="settings-website" class="form-input" maxlength="160" placeholder="https://example.com">
                         </div>
                     </div>
                 </section>
@@ -495,7 +683,7 @@
                     <div class="about-info">
                         <div class="about-row">
                             <span>Version</span>
-                            <span class="text-secondary" id="about-version">2.0.0</span>
+                            <span class="text-secondary" id="about-version">3.0.0</span>
                         </div>
                         <div class="about-row">
                             <span>Encryption</span>
@@ -706,6 +894,6 @@
 
     <div id="toast-container" class="toast-container"></div>
 
-    <script src="/static/script.js?v=5"></script>
+    <script src="/static/script.js?v=6"></script>
 </body>
 </html>
