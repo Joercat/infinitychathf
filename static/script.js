@@ -3681,7 +3681,6 @@
         _el('social-backups-btn')?.addEventListener('click', openBackupsModal);
         _el('social-settings-btn')?.addEventListener('click', openSocialSettings);
         _el('social-settings-save')?.addEventListener('click', closeSocialSettingsAndSave);
-        _el('social-setting-compact')?.addEventListener('change', () => applySocialSettings());
         _el('social-post-input')?.addEventListener('input', () => { _el('social-post-btn').disabled = !_el('social-post-input').value.trim() && !SocialState.media.length; _el('social-post-count').textContent = _el('social-post-input').value.length ? `${_el('social-post-input').value.length}/28000` : ''; });
         _el('social-feed')?.addEventListener('click', async (e) => {
             const fbtn = e.target.closest('[data-follow]'), pbtn = e.target.closest('[data-profile-follow]');
