@@ -2340,17 +2340,15 @@ async def get_social_feed_rest(
     try:
         blocked = await _blocked_user_ids(db, user["id"])
         if feed == "home":
+            # Home shows all public posts (so other users can see them) mixed
+            # with reposts made by accounts the viewer follows / themself.
             author_ids = await _social_author_ids(db, user["id"])
-            rows = []
-            if author_ids:
-                placeholders = ",".join("?" * len(author_ids))
-                cur = await db.execute(
-                    f"SELECT * FROM social_posts WHERE author_id IN ({placeholders}) "
-                    f"AND is_deleted = 0 ORDER BY created_at_ms DESC LIMIT ?",
-                    author_ids + [limit * 3])
-                rows = [dict(r) for r in await cur.fetchall()]
-            # Reposts by followed accounts + self, merged with original posts.
+            cur = await db.execute(
+                "SELECT * FROM social_posts WHERE is_deleted = 0 "
+                "ORDER BY created_at_ms DESC LIMIT ?", (limit * 3,))
+            rows = [dict(r) for r in await cur.fetchall()]
             reposter_ids = list(author_ids)
+            reposts = []
             if reposter_ids:
                 ph = ",".join("?" * len(reposter_ids))
                 cur = await db.execute(
@@ -2359,7 +2357,10 @@ async def get_social_feed_rest(
                     f"WHERE r.user_id IN ({ph}) AND p.is_deleted = 0",
                     reposter_ids)
                 reposts = [dict(r) for r in await cur.fetchall()]
-                rows = rows + reposts
+                repost_ids = {r["id"] for r in reposts}
+                # Prefer the repost entry when a followed account reposts a post;
+                # the original post is still visible to everyone below when not reposted.
+                rows = [r for r in rows if r["id"] not in repost_ids] + reposts
                 rows = sorted(rows, key=lambda r: r.get("reposted_at_ms") or r["created_at_ms"], reverse=True)
         elif feed == "explore":
             cur = await db.execute(
@@ -2368,6 +2369,10 @@ async def get_social_feed_rest(
             rows = [dict(r) for r in await cur.fetchall()]
         else:
             raise HTTPException(400, "Unknown feed")
+        # Never let blocked users crowd out visible posts before pagination.
+        rows = [r for r in rows
+                if r["author_id"] not in blocked
+                and (r.get("reposter_id") is None or r["reposter_id"] not in blocked)]
         if cursor >= 0:
             rows = [r for r in rows if r["created_at_ms"] < cursor]
         rows = rows[:limit]

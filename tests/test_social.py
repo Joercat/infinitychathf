@@ -90,6 +90,14 @@ async def main():
               "post with image created", r.text[:160])
         post_id = r.json()["post"]["id"]
 
+        # --- other users can see the post before following the author ---
+        r = await http.get(f"{BASE}/api/social/feed", params={"feed": "home", "limit": 50}, headers=h2)
+        check(any(p["id"] == post_id for p in r.json().get("posts", [])),
+              "another user sees the post in home feed", r.text[:160])
+        r = await http.get(f"{BASE}/api/social/feed", params={"feed": "explore", "limit": 50}, headers=h2)
+        check(any(p["id"] == post_id for p in r.json().get("posts", [])),
+              "another user sees the post in explore", r.text[:160])
+
         # --- text attachments are allowed by the shared uploader but rejected on posts ---
         txt = b"just some notes"
         tfp, up = await upload_file(http, t1, "notes.txt", txt, "text/plain")
