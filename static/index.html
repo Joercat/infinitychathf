@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=10">
+    <link rel="stylesheet" href="/static/style.css?v=11">
 </head>
 <body>
     <div id="auth-screen" class="screen active">
@@ -312,9 +312,6 @@
                 <button id="social-settings-btn" class="btn-icon" aria-label="Social settings" title="Social settings">
                     <i class="fas fa-sliders"></i>
                 </button>
-                <button id="social-backups-btn" class="btn-icon" aria-label="Backups" title="Backups">
-                    <i class="fas fa-clock-rotate-left"></i>
-                </button>
             </header>
 
             <div class="social-body">
@@ -496,28 +493,7 @@
         </div>
     </div>
 
-    <!-- Backups admin modal -->
-    <div id="backups-modal" class="modal hidden">
-        <div class="modal-backdrop" data-close="backups-modal"></div>
-        <div class="modal-container modal-md">
-            <div class="modal-header">
-                <h2><i class="fas fa-clock-rotate-left"></i> Backups</h2>
-                <button class="btn-icon" data-close="backups-modal"><i class="fas fa-times"></i></button>
-            </div>
-            <div class="modal-body">
-                <p class="text-secondary">Automated full backups run every hour. Restoring overwrites the live database and files — create a fresh backup first when possible.</p>
-                <div class="backups-key-row">
-                    <input type="password" id="backups-admin-key" class="form-input" placeholder="Backup admin key (leave blank in dev mode)">
-                    <button id="backups-refresh-btn" class="btn btn-secondary btn-sm"><i class="fas fa-sync"></i> Refresh</button>
-                    <button id="backups-create-btn" class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> Backup Now</button>
-                </div>
-                <div id="backups-list" class="backups-list"></div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-ghost" data-close="backups-modal">Close</button>
-            </div>
-        </div>
-    </div>
+    <!-- Backups are managed from the separate /admin console. -->
 
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal hidden">
@@ -985,6 +961,6 @@
 
     <div id="toast-container" class="toast-container"></div>
 
-    <script src="/static/script.js?v=10"></script>
+    <script src="/static/script.js?v=11"></script>
 </body>
 </html>

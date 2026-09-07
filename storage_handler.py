@@ -721,6 +721,17 @@ def restore_backup(local_db_path: str, backup_prefix: str) -> int:
     return restored
 
 
+def delete_backup(backup_prefix: str) -> None:
+    """Delete a timestamped backup tree. Only backups/... paths are allowed."""
+    if not backup_prefix or backup_prefix.startswith("/") or ".." in backup_prefix.split("/"):
+        raise ValueError("Invalid backup prefix")
+    bucket_prefix = f"{BACKUP_DIR}/"
+    if not backup_prefix.startswith(bucket_prefix):
+        raise ValueError("Only backups from the backup bucket can be deleted")
+    _delete_tree(backup_prefix)
+    logger.info(f"🗑  Deleted backup tree: {backup_prefix}")
+
+
 _backup_loop_started = False
 
 

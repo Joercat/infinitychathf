@@ -6,6 +6,7 @@ DATABASE_URL before running (see README/test harness examples).
 """
 import asyncio
 import json
+import os
 import sys
 import uuid
 
@@ -139,9 +140,20 @@ async def main():
         r = await http.get(f"{BASE}/api/social/posts/{post_id}", headers=h1)
         check(r.status_code == 404, "deleted post returns 404", r.text[:160])
 
-        # --- backup admin endpoints are reachable ---
-        r = await http.get(f"{BASE}/api/admin/backups", headers=h1)
-        check(r.status_code == 200, "backup list endpoint reachable", r.text[:160])
+        # --- backup admin endpoints are admin-only ---
+        admin_user = os.environ.get("ADMIN_USERNAME", "").strip()
+        admin_pass = os.environ.get("ADMIN_PASSWORD", "")
+        if admin_user and admin_pass:
+            r = await http.post(f"{BASE}/api/admin/login", json={"username": admin_user, "password": admin_pass})
+            check(r.status_code == 200 and r.json().get("token"), "admin login succeeds", r.text[:160])
+            admin_headers = {"X-Admin-Token": r.json()["token"]}
+            r = await http.get(f"{BASE}/api/admin/backups", headers=admin_headers)
+            check(r.status_code == 200, "admin backup list reachable", r.text[:160])
+            r = await http.get(f"{BASE}/api/admin/backups", headers=h1)
+            check(r.status_code == 401, "normal user cannot access admin backups", r.text[:160])
+        else:
+            r = await http.get(f"{BASE}/api/admin/backups", headers=h1)
+            check(r.status_code == 401, "backup admin requires dedicated admin auth", r.text[:160])
 
     print(f"\nfinished. failures={len(failures)}")
     print("ALL SOCIAL CHECKS PASSED" if not failures else "SOCIAL CHECKS FAILED")

@@ -3678,7 +3678,6 @@
         _el('social-compose-modal-submit')?.addEventListener('click', submitModalSocialPost);
         _el('social-search-input')?.addEventListener('input', debounce(e => socialSearch(e.target.value), 350));
         _el('social-search-clear')?.addEventListener('click', () => { _el('social-search-input').value=''; socialSearch(''); });
-        _el('social-backups-btn')?.addEventListener('click', openBackupsModal);
         _el('social-settings-btn')?.addEventListener('click', openSocialSettings);
         _el('social-settings-save')?.addEventListener('click', closeSocialSettingsAndSave);
         _el('social-post-input')?.addEventListener('input', () => { _el('social-post-btn').disabled = !_el('social-post-input').value.trim() && !SocialState.media.length; _el('social-post-count').textContent = _el('social-post-input').value.length ? `${_el('social-post-input').value.length}/28000` : ''; });
@@ -3713,10 +3712,6 @@
         _el('social-media-preview')?.addEventListener('click', (e) => { const b = e.target.closest('[data-remove-media]'); if (b) { SocialState.media.splice(Number(b.dataset.removeMedia), 1); socialPreviewMedia(); } });
         _el('social-compose-modal-media-preview')?.addEventListener('click', (e) => { const b = e.target.closest('[data-remove-modal-media]'); if (b) { SocialState.modalMedia.splice(Number(b.dataset.removeModalMedia), 1); socialPreviewModalMedia(); } });
         _el('social-logout-btn')?.addEventListener('click', () => { const logoutBtn = document.getElementById('logout-btn'); if (logoutBtn) logoutBtn.click(); });
-        _el('backups-list')?.addEventListener('click', (e) => {
-            const btn = e.target.closest('.backup-restore-btn');
-            if (btn) restoreFromBackup(btn);
-        });
         _el('social-feed')?.classList.toggle('social-feed-compact', !!SocialState.settings.compact);
         _el('social-unread-badge')?.classList.toggle('hidden', !SocialState.settings.badges);
         if (location.hash.startsWith('#social/')) {
@@ -3771,62 +3766,6 @@
         showToast('Social settings saved', 'success');
     }
 
-    function openBackupsModal() {
-        openModal(_el('backups-modal'));
-        loadBackups();
-    }
-
-    async function loadBackups() {
-        const box = _el('backups-list');
-        try {
-            const headers = { 'X-Auth-Token': State.token };
-            const key = _el('backups-admin-key').value.trim();
-            if (key) headers['X-Backup-Key'] = key;
-            const res = await fetch(`${API}/api/admin/backups`, { headers });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.detail || 'Could not load backups');
-            if (!data.backups || !data.backups.length) { box.innerHTML = '<div class="backups-empty">No backups yet. The first hourly backup will appear soon.</div>'; return; }
-            box.innerHTML = data.backups.map(b => `
-                <div class="backup-item">
-                    <div class="backup-item-info">
-                        <strong>${escapeHtml(b.category)} · ${escapeHtml(b.timestamp)}</strong>
-                        <span>${b.file_count || 0} files · ${formatFileSize(b.size || 0)}${b.has_database ? ' · with DB' : ''}</span>
-                    </div>
-                    <div class="backup-item-actions">
-                        <button class="btn btn-secondary btn-sm backup-restore-btn" data-path="${escapeHtml(b.path)}">Restore</button>
-                    </div>
-                </div>`).join('');
-        } catch (e) { box.innerHTML = `<div class="backups-empty">${escapeHtml(e.message)}</div>`; }
-    }
-
-    async function restoreFromBackup(btn) {
-        if (!confirm('Restore this backup? This overwrites the live database and all restored files. The server will be restarted to apply it.')) return;
-        btn.disabled = true; btn.textContent = 'Restoring…';
-        try {
-            const headers = { 'X-Auth-Token': State.token };
-            const key = _el('backups-admin-key').value.trim();
-            if (key) headers['X-Backup-Key'] = key;
-            const res = await fetch(`${API}/api/admin/backups/${encodeURIComponent(btn.dataset.path).replace(/%2F/g, '/')}/restore`, { method: 'POST', headers });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.detail || 'Restore failed');
-            showToast('Backup restored. Please restart the server to apply.', 'success');
-        } catch (err) { showToast(err.message, 'error'); }
-        finally { btn.disabled = false; btn.textContent = 'Restore'; }
-    }
-
-    _el('backups-refresh-btn')?.addEventListener('click', loadBackups);
-    _el('backups-create-btn')?.addEventListener('click', async () => {
-        try {
-            const headers = { 'X-Auth-Token': State.token };
-            const key = _el('backups-admin-key').value.trim();
-            if (key) headers['X-Backup-Key'] = key;
-            const res = await fetch(`${API}/api/admin/backups/create`, { method: 'POST', headers });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.detail || 'Backup failed');
-            showToast('Backup created!', 'success');
-            loadBackups();
-        } catch (e) { showToast(e.message, 'error'); }
-    });
 
     async function init() {
         applyPrefs();

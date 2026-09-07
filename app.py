@@ -8,12 +8,14 @@ import logging
 import tempfile
 import shutil
 import asyncio
+import secrets
+import threading
 from typing import Optional, Dict, List, Any, Tuple
 from contextlib import asynccontextmanager
 
 import aiosqlite
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Query, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,8 +28,8 @@ from cryptography.hazmat.backends import default_backend
 from storage_handler import (
     store_file, retrieve_file, delete_file,
     download_database, upload_database, start_db_sync,
-    list_backups, create_timestamped_backup, restore_backup, start_backup_loop,
-    StorageUnavailableError
+    list_backups, create_timestamped_backup, restore_backup, delete_backup,
+    start_backup_loop, StorageUnavailableError, _OFFLINE, LOCAL_STORAGE_DIR
 )
 
 # ------------------------------------------------------------------------
@@ -37,6 +39,14 @@ APP_VERSION = "3.0.0"
 DATABASE_URL = os.environ.get("DATABASE_URL", "/data/infinitychat.db")
 MESSAGE_KEY_B64 = os.environ.get("SECRET_KEY", None)
 FILE_ENCRYPTION_KEY_B64 = os.environ.get("FILE_ENCRYPTION_KEY", None)
+
+# Admin console credentials. These are intentionally plain-text secrets supplied
+# by the host via secret/environment configuration (ADMIN_USERNAME/ADMIN_PASSWORD).
+ADMIN_USERNAME = (os.environ.get("ADMIN_USERNAME", "") or "").strip()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "") or ""
+ADMIN_SESSION_TTL = 12 * 60 * 60
+ADMIN_SESSION_LOCK = threading.Lock()
+ADMIN_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("InfinityChat")
@@ -1924,7 +1934,6 @@ async def unblock_user_rest(user_id: int, token: str = Header(..., alias="X-Auth
 # ------------------------------------------------------------------------
 MAX_POST_LENGTH = 28000
 MAX_POST_MEDIA = 4
-BACKUP_ADMIN_KEY = os.environ.get("BACKUP_ADMIN_KEY", "")
 
 
 async def _blocked_user_ids(db: aiosqlite.Connection, uid: int) -> set:
@@ -2611,31 +2620,90 @@ async def mark_notifications_read_rest(token: str = Header(..., alias="X-Auth-To
 
 
 # ------------------------------------------------------------------------
-# Backup administration
+# Admin console (separate /admin page)
 # ------------------------------------------------------------------------
-def _check_backup_key(key: str):
-    required = BACKUP_ADMIN_KEY.strip()
-    if required and key != required:
-        raise HTTPException(403, "Invalid backup admin key")
+def _admin_configured() -> bool:
+    return bool(ADMIN_USERNAME and ADMIN_PASSWORD)
+
+
+def _require_admin(admin_token: Optional[str]) -> str:
+    if not _admin_configured():
+        raise HTTPException(503, "Admin login is not configured. Set ADMIN_USERNAME and ADMIN_PASSWORD.")
+    if not admin_token:
+        raise HTTPException(401, "Admin authentication required")
+    now = time.time()
+    with ADMIN_SESSION_LOCK:
+        sess = ADMIN_SESSIONS.get(admin_token)
+        if not sess or sess["expires"] < now:
+            ADMIN_SESSIONS.pop(admin_token, None)
+            raise HTTPException(401, "Admin session expired")
+        return sess.get("username", "admin")
+
+
+def _cleanup_admin_sessions(now: float = None) -> None:
+    now = now or time.time()
+    with ADMIN_SESSION_LOCK:
+        for key, sess in list(ADMIN_SESSIONS.items()):
+            if sess["expires"] < now:
+                ADMIN_SESSIONS.pop(key, None)
+
+
+@app.post("/api/admin/login")
+async def admin_login(request: Request):
+    if not _admin_configured():
+        raise HTTPException(503, "Admin login is not configured. Set ADMIN_USERNAME and ADMIN_PASSWORD.")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    username = str(body.get("username", "") or "").strip()
+    password = str(body.get("password", "") or "")
+    if username != ADMIN_USERNAME or password != ADMIN_PASSWORD:
+        raise HTTPException(401, "Invalid admin credentials")
+    _cleanup_admin_sessions()
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with ADMIN_SESSION_LOCK:
+        ADMIN_SESSIONS[token] = {
+            "username": username,
+            "created": now,
+            "expires": now + ADMIN_SESSION_TTL,
+        }
+    return {"token": token, "username": username, "expires_in": ADMIN_SESSION_TTL}
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(admin_token: str = Header(None, alias="X-Admin-Token")):
+    with ADMIN_SESSION_LOCK:
+        ADMIN_SESSIONS.pop(admin_token, None)
+    return {"status": "logged_out"}
+
+
+@app.get("/api/admin/status")
+async def admin_status(admin_token: str = Header(None, alias="X-Admin-Token")):
+    _require_admin(admin_token)
+    backups = await asyncio.to_thread(list_backups)
+    return {
+        "app_version": APP_VERSION,
+        "storage_mode": "local" if _OFFLINE else "bucket",
+        "db_path": DATABASE_URL,
+        "temp_dir": TEMP_DIR,
+        "local_storage_dir": LOCAL_STORAGE_DIR,
+        "backup_count": len(backups),
+        "backup_interval_seconds": 3600,
+        "admin_session_ttl_seconds": ADMIN_SESSION_TTL,
+    }
 
 
 @app.get("/api/admin/backups")
-async def admin_backups(token: str = Header(..., alias="X-Auth-Token"),
-                        x_backup_key: str = Header(None, alias="X-Backup-Key")):
-    user = await authenticate_user(token)
-    if not user:
-        raise HTTPException(401)
-    _check_backup_key(x_backup_key or "")
-    return {"backups": await asyncio.to_thread(list_backups), "offline": False}
+async def admin_backups(admin_token: str = Header(None, alias="X-Admin-Token")):
+    _require_admin(admin_token)
+    return {"backups": await asyncio.to_thread(list_backups), "offline": _OFFLINE}
 
 
 @app.post("/api/admin/backups/create")
-async def admin_create_backup(token: str = Header(..., alias="X-Auth-Token"),
-                              x_backup_key: str = Header(None, alias="X-Backup-Key")):
-    user = await authenticate_user(token)
-    if not user:
-        raise HTTPException(401)
-    _check_backup_key(x_backup_key or "")
+async def admin_create_backup(admin_token: str = Header(None, alias="X-Admin-Token")):
+    _require_admin(admin_token)
     path = await asyncio.to_thread(create_timestamped_backup, DATABASE_URL, "manual")
     if not path:
         raise HTTPException(503, "Backup unavailable (storage offline or failure)")
@@ -2643,12 +2711,8 @@ async def admin_create_backup(token: str = Header(..., alias="X-Auth-Token"),
 
 
 @app.post("/api/admin/backups/{backup_prefix:path}/restore")
-async def admin_restore_backup(backup_prefix: str, token: str = Header(..., alias="X-Auth-Token"),
-                               x_backup_key: str = Header(None, alias="X-Backup-Key")):
-    user = await authenticate_user(token)
-    if not user:
-        raise HTTPException(401)
-    _check_backup_key(x_backup_key or "")
+async def admin_restore_backup(backup_prefix: str, admin_token: str = Header(None, alias="X-Admin-Token")):
+    _require_admin(admin_token)
     try:
         count = await asyncio.to_thread(restore_backup, DATABASE_URL, backup_prefix)
     except StorageUnavailableError as e:
@@ -2658,6 +2722,20 @@ async def admin_restore_backup(backup_prefix: str, token: str = Header(..., alia
     except Exception as e:
         raise HTTPException(500, f"Restore failed: {e}")
     return {"status": "restored", "files": count, "restart_recommended": True}
+
+
+@app.delete("/api/admin/backups/{backup_prefix:path}")
+async def admin_delete_backup(backup_prefix: str, admin_token: str = Header(None, alias="X-Admin-Token")):
+    _require_admin(admin_token)
+    try:
+        await asyncio.to_thread(delete_backup, backup_prefix)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except StorageUnavailableError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Delete failed: {e}")
+    return {"status": "deleted", "path": backup_prefix}
 
 
 # ------------------------------------------------------------------------
@@ -3636,3 +3714,8 @@ async def ws_endpoint(ws: WebSocket, token: str = Query(...)):
 @app.get("/")
 async def root():
     return FileResponse("static/index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/admin", include_in_schema=False)
+async def admin_page():
+    return FileResponse("static/admin.html", headers={"Cache-Control": "no-cache"})
