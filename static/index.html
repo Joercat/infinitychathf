@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=7">
+    <link rel="stylesheet" href="/static/style.css?v=8">
 </head>
 <body>
     <div id="auth-screen" class="screen active">
@@ -309,6 +309,9 @@
                         <i class="fas fa-times"></i>
                     </button>
                 </div>
+                <button id="social-settings-btn" class="btn-icon" aria-label="Social settings" title="Social settings">
+                    <i class="fas fa-sliders"></i>
+                </button>
                 <button id="social-backups-btn" class="btn-icon" aria-label="Backups" title="Backups">
                     <i class="fas fa-clock-rotate-left"></i>
                 </button>
@@ -377,6 +380,10 @@
                                 </button>
                             </div>
                             <div id="social-media-preview" class="social-media-preview hidden"></div>
+                            <div id="social-upload-progress" class="social-upload-progress hidden">
+                                <div class="social-progress-track"><div class="social-progress-fill" style="width:0%"></div></div>
+                                <span>Uploading…</span>
+                            </div>
                         </div>
                     </div>
                     <div id="social-feed" class="social-feed">
@@ -420,6 +427,10 @@
                 <textarea id="social-compose-modal-input" class="social-post-input"
                           placeholder="What is happening?!" maxlength="28000" rows="5"></textarea>
                 <div id="social-compose-modal-media-preview" class="social-media-preview hidden"></div>
+                <div id="social-compose-modal-progress" class="social-upload-progress hidden">
+                    <div class="social-progress-track"><div class="social-progress-fill" style="width:0%"></div></div>
+                    <span>Uploading…</span>
+                </div>
                 <div class="social-compose-tools">
                     <label class="btn-icon" title="Upload media" for="social-compose-modal-media">
                         <i class="fas fa-image"></i>
@@ -431,6 +442,56 @@
                 </div>
                 <input type="file" id="social-compose-modal-media" class="hidden" multiple
                        accept="image/*,video/*" style="display:none">
+            </div>
+        </div>
+    </div>
+
+    <!-- Social settings modal -->
+    <div id="social-settings-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close="social-settings-modal"></div>
+        <div class="modal-container modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-sliders"></i> Social Settings</h2>
+                <button class="btn-icon" data-close="social-settings-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-toggle-row">
+                    <div><label for="social-setting-autoplay">Autoplay media</label><div class="toggle-hint">Play videos automatically in your feed</div></div>
+                    <label class="toggle-switch"><input type="checkbox" id="social-setting-autoplay"><span class="toggle-slider"></span></label>
+                </div>
+                <div class="settings-toggle-row">
+                    <div><label for="social-setting-muted">Mute videos by default</label><div class="toggle-hint">Start videos muted when autoplaying</div></div>
+                    <label class="toggle-switch"><input type="checkbox" id="social-setting-muted" checked><span class="toggle-slider"></span></label>
+                </div>
+                <div class="settings-toggle-row">
+                    <div><label for="social-setting-hide-reposts">Hide reposts</label><div class="toggle-hint">Remove reposts from Home</div></div>
+                    <label class="toggle-switch"><input type="checkbox" id="social-setting-hide-reposts"><span class="toggle-slider"></span></label>
+                </div>
+                <div class="settings-toggle-row">
+                    <div><label for="social-setting-compact">Compact posts</label><div class="toggle-hint">Show more posts with smaller cards</div></div>
+                    <label class="toggle-switch"><input type="checkbox" id="social-setting-compact"><span class="toggle-slider"></span></label>
+                </div>
+                <div class="settings-toggle-row">
+                    <div><label for="social-setting-live">Live refresh</label><div class="toggle-hint">Automatically refresh the feed</div></div>
+                    <label class="toggle-switch"><input type="checkbox" id="social-setting-live" checked><span class="toggle-slider"></span></label>
+                </div>
+                <div class="settings-toggle-row">
+                    <div><label for="social-setting-badges">Notification badge</label><div class="toggle-hint">Show unread notification count</div></div>
+                    <label class="toggle-switch"><input type="checkbox" id="social-setting-badges" checked><span class="toggle-slider"></span></label>
+                </div>
+                <div class="form-group" style="margin-top:1rem">
+                    <label for="social-setting-default">Default feed</label>
+                    <div class="input-wrapper">
+                        <select id="social-setting-default" class="form-input">
+                            <option value="home">Home</option>
+                            <option value="explore">Explore</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" data-close="social-settings-modal">Cancel</button>
+                <button id="social-settings-save" class="btn btn-primary"><i class="fas fa-check"></i> Save</button>
             </div>
         </div>
     </div>
@@ -585,6 +646,36 @@
                                     </div>
                                 </div>
                                 <span>Custom</span>
+                            </button>
+                            <button class="theme-option" data-theme="midnight">
+                                <div class="theme-preview theme-preview-midnight">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-body">
+                                        <div class="theme-preview-message self"></div>
+                                        <div class="theme-preview-message other"></div>
+                                    </div>
+                                </div>
+                                <span>Midnight</span>
+                            </button>
+                            <button class="theme-option" data-theme="ocean">
+                                <div class="theme-preview theme-preview-ocean">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-body">
+                                        <div class="theme-preview-message self"></div>
+                                        <div class="theme-preview-message other"></div>
+                                    </div>
+                                </div>
+                                <span>Ocean</span>
+                            </button>
+                            <button class="theme-option" data-theme="sunset">
+                                <div class="theme-preview theme-preview-sunset">
+                                    <div class="theme-preview-header"></div>
+                                    <div class="theme-preview-body">
+                                        <div class="theme-preview-message self"></div>
+                                        <div class="theme-preview-message other"></div>
+                                    </div>
+                                </div>
+                                <span>Sunset</span>
                             </button>
                         </div>
                     </div>
@@ -894,6 +985,6 @@
 
     <div id="toast-container" class="toast-container"></div>
 
-    <script src="/static/script.js?v=7"></script>
+    <script src="/static/script.js?v=8"></script>
 </body>
 </html>

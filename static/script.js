@@ -2371,16 +2371,14 @@
         await uploadChunked(file);
     });
 
-    async function uploadChunked(file) {
+    async function uploadFileChunked(file, onProgress) {
         if (file.size > 500 * 1024 * 1024) {
-            showToast('File too large (max 500MB)', 'error');
-            return;
+            throw new Error('File too large (max 500MB)');
         }
         const CHUNK_SIZE = 5 * 1024 * 1024;
         const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
         const uploadId = generateId();
-        DOM.uploadProgress.classList.remove('hidden');
-        updateProgress(0, file.name, file.size);
+        if (onProgress) onProgress(0, file.name, file.size, totalChunks);
 
         for (let i = 0; i < totalChunks; i++) {
             const blob = file.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, file.size));
@@ -2389,36 +2387,41 @@
             const url = `${API}/api/upload/chunk?chunk_index=${i}&total_chunks=${totalChunks}` +
                 `&file_name=${encodeURIComponent(file.name)}&file_type=${encodeURIComponent(file.type || 'application/octet-stream')}` +
                 `&file_size=${file.size}&upload_id=${uploadId}`;
-            try {
-                const res = await fetch(url, {
-                    method: 'POST', body: formData, headers: { 'X-Auth-Token': State.token }
-                });
-                if (!res.ok) {
-                    const data = await res.json().catch(() => ({}));
-                    throw new Error(data.detail || 'Upload failed');
-                }
-                const data = await res.json();
-                updateProgress(((i + 1) / totalChunks) * 100, file.name, file.size);
-                if (data.status === 'complete') {
-                    State.pendingFile = {
-                        file_path: data.file_path,
-                        file_type: data.file_type || file.type,
-                        file_name: data.file_name,
-                        file_size: data.file_size
-                    };
-                    showUploadPreview(State.pendingFile);
-                    DOM.uploadProgress.classList.add('hidden');
-                    DOM.sendBtn.disabled = false;
-                    DOM.messageInput.focus();
-                    return;
-                }
-            } catch (err) {
-                showToast('Upload failed: ' + err.message, 'error');
-                DOM.uploadProgress.classList.add('hidden');
-                return;
+            const res = await fetch(url, {
+                method: 'POST', body: formData, headers: { 'X-Auth-Token': State.token }
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.detail || 'Upload failed');
+            }
+            const data = await res.json();
+            const percent = ((i + 1) / totalChunks) * 100;
+            if (onProgress) onProgress(percent, file.name, file.size, totalChunks);
+            if (data.status === 'complete') {
+                return {
+                    file_path: data.file_path,
+                    file_type: data.file_type || file.type,
+                    file_name: data.file_name,
+                    file_size: data.file_size
+                };
             }
         }
-        DOM.uploadProgress.classList.add('hidden');
+        throw new Error('Upload did not complete');
+    }
+
+    async function uploadChunked(file) {
+        try {
+            DOM.uploadProgress.classList.remove('hidden');
+            updateProgress(0, file.name, file.size);
+            State.pendingFile = await uploadFileChunked(file, (pct) => updateProgress(pct, file.name, file.size));
+            showUploadPreview(State.pendingFile);
+            DOM.uploadProgress.classList.add('hidden');
+            DOM.sendBtn.disabled = false;
+            DOM.messageInput.focus();
+        } catch (err) {
+            showToast('Upload failed: ' + err.message, 'error');
+            DOM.uploadProgress.classList.add('hidden');
+        }
     }
 
     function updateProgress(percent, filename, size) {
@@ -3091,12 +3094,31 @@
     // Social feed page (Twitter/X-like)
     // ============================================================
     const MAX_POST_MEDIA = 4;
+    const DEFAULT_SOCIAL_SETTINGS = {
+        autoplay: false, muted: true, hideReposts: false, compact: false,
+        live: true, badges: true, defaultFeed: 'home'
+    };
+
+    function loadSocialSettings() {
+        let out = { ...DEFAULT_SOCIAL_SETTINGS };
+        try {
+            const raw = store.get('social-settings');
+            if (raw) Object.assign(out, JSON.parse(raw));
+        } catch (e) { /* defaults */ }
+        return out;
+    }
+
+    function saveSocialSettings() {
+        store.set('social-settings', JSON.stringify(SocialState.settings));
+    }
+
     const SocialState = {
         inited: false, view: 'home', feedCursor: null,
         media: [], modalMedia: [], modalMode: 'compose',
         replyTarget: null, quoteTarget: null, profileUser: null,
         posts: new Map(), following: new Set(), isSearching: false,
-        searchTimer: null
+        searchTimer: null, pollTimer: null, editingPost: null,
+        settings: loadSocialSettings()
     };
 
     function _el(id) { return document.getElementById(id); }
@@ -3147,11 +3169,12 @@
             const fp = m.file_path || '';
             const name = (m.file_name || fp || '').split('/').pop();
             const type = (m.file_type || '').toLowerCase();
-            const img = type.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(fp);
-            const video = type.startsWith('video/') || /\.(mp4|webm|mov|ogg)$/i.test(fp);
+            const img = type.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp|avif)$/i.test(fp);
+            const video = type.startsWith('video/') || /\.(mp4|webm|mov|ogg|m4v|mpeg|mpg)$/i.test(fp);
             let c = '';
-            if (img) c = `<img src="${escapeHtml(fileUrl(fp))}" alt="${escapeHtml(name)}" loading="lazy">`;
-            else if (video) c = `<video controls preload="metadata" src="${escapeHtml(fileUrl(fp))}"></video>`;
+            const videoAttrs = SocialState.settings.autoplay ? (SocialState.settings.muted ? ' autoplay muted loop ' : ' autoplay ') : '';
+            if (img) c = `<img src="${escapeHtml(fileUrl(fp))}" alt="${escapeHtml(name)}" loading="lazy" data-media-image="${escapeHtml(fileUrl(fp))}" data-media-name="${escapeHtml(name)}">`;
+            else if (video) c = `<video controls preload="metadata" src="${escapeHtml(fileUrl(fp))}" ${videoAttrs}></video>`;
             else c = `<a class="social-file" href="${escapeHtml(fileUrl(fp))}" target="_blank" rel="noopener"><i class="fas fa-file"></i> ${escapeHtml(name)}</a>`;
             return `<div class="social-media-item${img ? ' img' : ''}">${c}</div>`;
         }).join('');
@@ -3188,8 +3211,10 @@
                 <button class="sp-action" data-action="quote" data-id="${post.id}" title="Quote">
                     <i class="fas fa-quote-right"></i><span></span>
                 </button>
+                ${isOwn ? `<button class="sp-action" data-action="edit" data-id="${post.id}" title="Edit"><i class="fas fa-pen"></i></button>` : ''}
                 ${isOwn ? `<button class="sp-action danger" data-action="delete" data-id="${post.id}" title="Delete"><i class="fas fa-trash"></i></button>` : ''}
                 ${!isOwn ? `<button class="sp-action" data-action="profile" data-username="${escapeHtml(author.username || '')}" title="Profile"><i class="fas fa-user"></i></button>` : ''}
+                <button class="sp-action" data-action="share" data-id="${post.id}" title="Copy link"><i class="fas fa-link"></i></button>
             </div>`;
         return `<article class="social-post" data-post-id="${post.id}">
             <div class="social-avatar${author.avatar_path ? '' : ' ah'}">${socialAvatarHtml(author, 'social-avatar-img')}</div>
@@ -3230,15 +3255,35 @@
         DOM.chatScreen.classList.remove('active');
         updateSocialMe();
         if (!SocialState.inited) initSocial();
-        await SocialLoad.view(SocialState.view || 'home');
+        const feed = SocialState.settings.defaultFeed === 'explore' ? 'explore' : SocialState.view || 'home';
+        SocialState.view = feed;
+        await SocialLoad.view(feed);
+        startSocialPoll();
+        const hashMatch = location.hash.match(/^#social\/(\d+)$/);
+        if (hashMatch) { try { const data = await apiGet(`/api/social/posts/${hashMatch[1]}`); renderSocialPosts([data.post]); _el('social-compose').style.display='none'; } catch(e) {} }
     }
 
     function backToChat() {
         SocialState.isSearching = false;
         SocialState.profileUser = null;
+        stopSocialPoll();
         _el('social-screen').classList.remove('active');
         DOM.chatScreen.classList.add('active');
         updateSidebarMe();
+    }
+
+    function startSocialPoll() {
+        stopSocialPoll();
+        if (!SocialState.settings.live) return;
+        SocialState.pollTimer = setInterval(async () => {
+            if (!_el('social-screen').classList.contains('active') || SocialState.isSearching) return;
+            if (SocialState.view !== 'home' && SocialState.view !== 'explore') return;
+            try { await SocialLoad.feed(SocialState.view, true); } catch (e) { /* non-fatal */ }
+        }, 15000);
+    }
+
+    function stopSocialPoll() {
+        if (SocialState.pollTimer) { clearInterval(SocialState.pollTimer); SocialState.pollTimer = null; }
     }
 
     function updateSocialMe() {
@@ -3253,17 +3298,21 @@
         else { cAv.classList.add('hidden'); cPh.classList.remove('hidden'); cPh.textContent = socialInitial(displayNameOf(State.user)); }
     }
 
-    async function uploadSocialFile(file) {
+    const SOCIAL_MEDIA_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif', '.mp4', '.webm', '.mov', '.m4v', '.ogg', '.mpeg', '.mpg'];
+
+    function isSocialMediaFile(file) {
+        if (!file) return false;
+        const t = (file.type || '').toLowerCase();
+        const ext = ('.' + (file.name || '').split('.').pop().toLowerCase());
+        return t.startsWith('image/') || t.startsWith('video/') || SOCIAL_MEDIA_EXTS.includes(ext);
+    }
+
+    async function uploadSocialFile(file, onProgress) {
         if (!file) return null;
-        if (file.size > 50 * 1024 * 1024) throw new Error('Media files must be under 50MB');
+        if (!isSocialMediaFile(file)) throw new Error('Only images and videos can be attached to posts');
+        if (file.size > 200 * 1024 * 1024) throw new Error('Social media files must be under 200MB');
         if (!State.user) throw new Error('Not signed in');
-        const fd = new FormData();
-        fd.append('file', file);
-        const url = `${API}/api/upload/chunk?chunk_index=0&total_chunks=1&file_name=${encodeURIComponent(file.name)}&file_type=${encodeURIComponent(file.type || 'application/octet-stream')}&file_size=${file.size}&upload_id=${generateId()}`;
-        const res = await fetch(url, { method: 'POST', headers: { 'X-Auth-Token': State.token }, body: fd });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || 'Upload failed');
-        return data;
+        return await uploadFileChunked(file, onProgress);
     }
 
     function socialPreviewMedia() {
@@ -3273,25 +3322,39 @@
         box.classList.remove('hidden');
         box.innerHTML = list.map((m, i) => `
             <div class="social-media-preview-item">
-                ${m.file_type && m.file_type.startsWith('video/') ? `<video src="${escapeHtml(fileUrl(m.file_path))}" muted></video>` : `<img src="${escapeHtml(fileUrl(m.file_path))}" alt="">`}
+                ${m.file_type && m.file_type.startsWith('video/') ? `<video src="${escapeHtml(m.preview_url || fileUrl(m.file_path))}" muted></video>` : `<img src="${escapeHtml(m.preview_url || fileUrl(m.file_path))}" alt="">`}
                 <button class="btn-icon btn-icon-sm" data-remove-media="${i}"><i class="fas fa-times"></i></button>
             </div>`).join('');
     }
 
     async function addSocialMedia(files, modal) {
         if (!files || !files.length) return;
+        const progress = modal ? _el('social-compose-modal-progress') : _el('social-upload-progress');
+        const fill = progress ? progress.querySelector('.social-progress-fill') : null;
+        const label = progress ? progress.querySelector('span') : null;
+        if (progress) progress.classList.remove('hidden');
         try {
             const target = modal ? SocialState.modalMedia : SocialState.media;
             for (const f of Array.from(files)) {
+                if (!isSocialMediaFile(f)) { showToast(f.name + ' is not an image or video', 'warning'); continue; }
                 if (target.length >= MAX_POST_MEDIA) { showToast('A post can contain at most ' + MAX_POST_MEDIA + ' media files', 'warning'); break; }
-                const up = await uploadSocialFile(f);
+                const up = await uploadSocialFile(f, (pct, name) => {
+                    if (fill) fill.style.width = Math.round(pct) + '%';
+                    if (label) label.textContent = 'Uploading ' + name + '… ' + Math.round(pct) + '%';
+                });
                 if (!up) continue;
-                target.push({ file_path: up.file_path, file_name: up.file_name, file_type: up.file_type, file_size: up.file_size });
+                target.push({ file_path: up.file_path, file_name: up.file_name, file_type: up.file_type, file_size: up.file_size, preview_url: URL.createObjectURL(f) });
+                if (fill) fill.style.width = '0%';
             }
             socialPreviewMedia();
             if (modal) socialPreviewModalMedia();
         } catch (e) { showToast(e.message, 'error'); }
-        finally { if (modal) _el('social-compose-modal-media').value = ''; else _el('social-media-input').value = ''; }
+        finally {
+            if (progress) progress.classList.add('hidden');
+            if (fill) fill.style.width = '0%';
+            if (label) label.textContent = '';
+            if (modal) _el('social-compose-modal-media').value = ''; else _el('social-media-input').value = '';
+        }
     }
 
     function socialPreviewModalMedia() {
@@ -3301,7 +3364,7 @@
         box.classList.remove('hidden');
         box.innerHTML = list.map((m, i) => `
             <div class="social-media-preview-item">
-                ${m.file_type && m.file_type.startsWith('video/') ? `<video src="${escapeHtml(fileUrl(m.file_path))}" muted></video>` : `<img src="${escapeHtml(fileUrl(m.file_path))}" alt="">`}
+                ${m.file_type && m.file_type.startsWith('video/') ? `<video src="${escapeHtml(m.preview_url || fileUrl(m.file_path))}" muted></video>` : `<img src="${escapeHtml(m.preview_url || fileUrl(m.file_path))}" alt="">`}
                 <button class="btn-icon btn-icon-sm" data-remove-modal-media="${i}"><i class="fas fa-times"></i></button>
             </div>`).join('');
     }
@@ -3310,7 +3373,8 @@
         const body = _el('social-post-input').value.trim();
         if (!body && !SocialState.media.length) return;
         SocialState.media = SocialState.media.slice(0, MAX_POST_MEDIA);
-        const url = `/api/social/posts?body=${encodeURIComponent(body)}&media_json=${encodeURIComponent(JSON.stringify(SocialState.media))}`;
+        const mediaPayload = SocialState.media.map((m) => { const { preview_url, ...rest } = m; return rest; });
+        const url = `/api/social/posts?body=${encodeURIComponent(body)}&media_json=${encodeURIComponent(JSON.stringify(mediaPayload))}`;
         try {
             const data = await apiPost(url);
             if (data.post) {
@@ -3328,28 +3392,73 @@
         const body = _el('social-compose-modal-input').value.trim();
         const media = SocialState.modalMedia;
         if (!body && !media.length) return;
-        const q = [];
-        q.push('body=' + encodeURIComponent(body));
-        if (media.length) q.push('media_json=' + encodeURIComponent(JSON.stringify(media)));
-        if (SocialState.replyTarget) q.push('reply_to_id=' + socialInt(SocialState.replyTarget.id));
-        if (SocialState.quoteTarget) q.push('quote_id=' + socialInt(SocialState.quoteTarget.id));
         try {
-            const data = await apiPost(`/api/social/posts?${q.join('&')}`);
+            let data;
+            if (SocialState.editingPost) {
+                if (!body.trim()) throw new Error('Post body cannot be empty');
+                data = await apiPatch(`/api/social/posts/${SocialState.editingPost.id}?body=${encodeURIComponent(body)}`);
+            } else {
+                const q = [];
+                q.push('body=' + encodeURIComponent(body));
+                if (media.length) q.push('media_json=' + encodeURIComponent(JSON.stringify(media.map((m) => { const { preview_url, ...rest } = m; return rest; }))));
+                if (SocialState.replyTarget) q.push('reply_to_id=' + socialInt(SocialState.replyTarget.id));
+                if (SocialState.quoteTarget) q.push('quote_id=' + socialInt(SocialState.quoteTarget.id));
+                data = await apiPost(`/api/social/posts?${q.join('&')}`);
+            }
             if (data.post) {
+                const wasEdit = !!SocialState.editingPost;
                 closeModal(_el('social-compose-modal'));
+                SocialState.editingPost = null;
                 SocialState.modalMedia = []; SocialState.replyTarget = null; SocialState.quoteTarget = null;
                 _el('social-compose-modal-input').value = '';
                 _el('social-compose-modal-context').classList.add('hidden');
                 socialPreviewModalMedia();
-                showToast('Posted!', 'success');
+                showToast(wasEdit ? 'Post updated!' : 'Posted!', 'success');
                 await SocialLoad.view(SocialState.view, true);
             }
         } catch (e) { showToast(e.message, 'error'); }
     }
 
+    function openSocialEditModal(post) {
+        if (!post) return;
+        SocialState.editingPost = post;
+        SocialState.modalMode = 'edit';
+        SocialState.replyTarget = null;
+        SocialState.quoteTarget = null;
+        _el('social-compose-modal-title').innerHTML = '<i class="fas fa-pen"></i> Edit Post';
+        _el('social-compose-modal-input').value = post.body || '';
+        _el('social-compose-modal-context').classList.add('hidden');
+        _el('social-compose-modal-media').value = '';
+        SocialState.modalMedia = [];
+        socialPreviewModalMedia();
+        openModal(_el('social-compose-modal'));
+        setTimeout(() => _el('social-compose-modal-input').focus(), 50);
+    }
+
+    function copySocialPostLink(post) {
+        const url = `${location.origin}/#social/${post.id}`;
+        const done = () => showToast('Post link copied', 'success');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(done).catch(() => { prompt('Post link', url); done(); });
+        } else {
+            prompt('Post link', url);
+            done();
+        }
+    }
+
+
+    function openSocialLightbox(name, url) {
+        if (!url) return;
+        DOM.lightboxName.textContent = name || 'Media';
+        DOM.lightboxImg.src = url;
+        DOM.lightboxDownload.href = url;
+        openModal(DOM.lightboxModal);
+    }
+
     function socialInt(v) { const n = Number(v); return Number.isFinite(n) ? Math.floor(n) : null; }
 
     function openSocialComposeModal(mode, target) {
+        SocialState.editingPost = null;
         SocialState.modalMode = mode || 'compose';
         SocialState.replyTarget = mode === 'reply' ? target : null;
         SocialState.quoteTarget = mode === 'quote' ? target : null;
@@ -3366,10 +3475,11 @@
     }
 
     function userCardHtml(u) {
+        const following = !!u.is_following;
         return `<div class="social-user-card" data-username="${escapeHtml(u.username || '')}">
             <div class="user-avatar">${socialAvatarHtml(u)}</div>
             <div class="social-user-info"><strong>${escapeHtml(displayNameOf(u))}</strong><span>@${escapeHtml(u.username || '')}</span></div>
-            <button class="btn btn-primary btn-sm social-follow-btn" data-follow="${escapeHtml(u.username || '')}">Follow</button>
+            <button class="btn btn-primary btn-sm social-follow-btn${following ? ' following' : ''}" data-follow="${escapeHtml(u.username || '')}">${following ? 'Following' : 'Follow'}</button>
         </div>`;
     }
 
@@ -3428,6 +3538,8 @@
             const prof = await apiGet(`/api/social/profile/${encodeURIComponent(username)}`);
             const posts = await apiGet(`/api/social/users/${encodeURIComponent(username)}/posts`);
             SocialState.profileUser = prof.profile;
+            SocialState.posts.clear();
+            (posts.posts || []).forEach(p => SocialState.posts.set(p.id, p));
             _el('social-compose').style.display = 'none';
             _el('social-page-title').textContent = '@' + username;
             _el('social-page-sub').textContent = displayNameOf(prof.profile) + "'s posts";
@@ -3482,7 +3594,9 @@
             try {
                 const data = await apiGet(`/api/social/feed?feed=${feed}&limit=50`);
                 if (!force) SocialState.posts.clear();
-                renderSocialPosts(data.posts || []);
+                let posts = data.posts || [];
+                if (feed === 'home' && SocialState.settings.hideReposts) posts = posts.filter(p => !p.reposter_id);
+                renderSocialPosts(posts);
             } catch (e) { showToast(e.message, 'error'); }
             finally { loading.classList.add('hidden'); }
         },
@@ -3493,7 +3607,7 @@
                 if (!list.length) { renderSocialPosts([], _el('social-feed')); return; }
                 const unread = list.filter(n => !n.read).length;
                 _el('social-unread-badge').textContent = unread;
-                _el('social-unread-badge').classList.toggle('hidden', !unread);
+                _el('social-unread-badge').classList.toggle('hidden', !unread || !SocialState.settings.badges);
                 _el('social-feed').innerHTML = list.map(n => `
                     <article class="social-notification" data-post-id="${n.post_id || ''}">
                         <div class="social-avatar ah">${socialAvatarHtml(n.actor, 'social-avatar-img')}</div>
@@ -3541,6 +3655,7 @@
         _el('social-page-sub').textContent = 'Results for "' + q + '"';
         try {
             const data = await apiGet(`/api/social/search?q=${encodeURIComponent(q)}`);
+            (data.posts || []).forEach(p => SocialState.posts.set(p.id, p));
             const users = (data.users || []).map(userCardHtml).join('');
             const posts = (data.posts || []).map(socialPostHtml).join('');
             _el('social-feed').innerHTML = (users ? `<section class="social-search-users"><h3>People</h3>${users}</section>` : '') + (posts ? `<section class="social-search-posts"><h3>Posts</h3>${posts}</section>` : (!users && !posts ? '<div class="social-feed-empty"><i class="fas fa-search"></i><h3>No results</h3></div>' : ''));
@@ -3564,6 +3679,9 @@
         _el('social-search-input')?.addEventListener('input', debounce(e => socialSearch(e.target.value), 350));
         _el('social-search-clear')?.addEventListener('click', () => { _el('social-search-input').value=''; socialSearch(''); });
         _el('social-backups-btn')?.addEventListener('click', openBackupsModal);
+        _el('social-settings-btn')?.addEventListener('click', openSocialSettings);
+        _el('social-settings-save')?.addEventListener('click', closeSocialSettingsAndSave);
+        _el('social-setting-compact')?.addEventListener('change', () => applySocialSettings());
         _el('social-post-input')?.addEventListener('input', () => { _el('social-post-btn').disabled = !_el('social-post-input').value.trim() && !SocialState.media.length; _el('social-post-count').textContent = _el('social-post-input').value.length ? `${_el('social-post-input').value.length}/28000` : ''; });
         _el('social-feed')?.addEventListener('click', async (e) => {
             const fbtn = e.target.closest('[data-follow]'), pbtn = e.target.closest('[data-profile-follow]');
@@ -3575,11 +3693,15 @@
             if (mention) { openProfile(mention.dataset.username); return; }
             const hashtag = e.target.closest('[data-hashtag]');
             if (hashtag) { socialSearch('#' + decodeURIComponent(hashtag.dataset.hashtag)); _el('social-search-input').value = '#' + decodeURIComponent(hashtag.dataset.hashtag); return; }
+            const mediaImg = e.target.closest('[data-media-image]');
+            if (mediaImg && e.target.tagName.toLowerCase() === 'img') { openSocialLightbox(mediaImg.dataset.mediaName, mediaImg.dataset.mediaImage); return; }
             const actionBtn = e.target.closest('[data-action]');
             if (actionBtn) {
                 const id = Number(actionBtn.dataset.id), action = actionBtn.dataset.action;
                 if (action === 'reply') { const post = SocialState.posts.get(id); openSocialComposeModal('reply', post); return; }
                 if (action === 'quote') { const post = SocialState.posts.get(id); openSocialComposeModal('quote', post); return; }
+                if (action === 'edit') { const post = SocialState.posts.get(id); openSocialEditModal(post); return; }
+                if (action === 'share') { const post = SocialState.posts.get(id); copySocialPostLink(post); return; }
                 if (action === 'profile') { const un = actionBtn.dataset.username; openProfile(un); return; }
                 await socialAction(id, action); return;
             }
@@ -3596,8 +3718,58 @@
             const btn = e.target.closest('.backup-restore-btn');
             if (btn) restoreFromBackup(btn);
         });
+        _el('social-feed')?.classList.toggle('social-feed-compact', !!SocialState.settings.compact);
+        _el('social-unread-badge')?.classList.toggle('hidden', !SocialState.settings.badges);
+        if (location.hash.startsWith('#social/')) {
+            const id = Number(location.hash.split('/').pop());
+            if (id) {
+                apiGet(`/api/social/posts/${id}`).then(d => {
+                    SocialState.posts.set(d.post.id, d.post);
+                    renderSocialPosts([d.post]);
+                    _el('social-compose').style.display = 'none';
+                }).catch(() => {});
+            }
+        }
         SocialLoad.trending();
         SocialLoad.suggestions();
+    }
+
+    function openSocialSettings() {
+        const s = SocialState.settings;
+        _el('social-setting-autoplay').checked = !!s.autoplay;
+        _el('social-setting-muted').checked = !!s.muted;
+        _el('social-setting-hide-reposts').checked = !!s.hideReposts;
+        _el('social-setting-compact').checked = !!s.compact;
+        _el('social-setting-live').checked = !!s.live;
+        _el('social-setting-badges').checked = !!s.badges;
+        _el('social-setting-default').value = s.defaultFeed || 'home';
+        openModal(_el('social-settings-modal'));
+    }
+
+    function applySocialSettings() {
+        const s = SocialState.settings;
+        saveSocialSettings();
+        const feed = _el('social-feed');
+        if (feed) feed.classList.toggle('social-feed-compact', !!s.compact);
+        _el('social-unread-badge').classList.toggle('hidden', !s.badges);
+        if (_el('social-screen').classList.contains('active')) {
+            if (s.live) startSocialPoll(); else stopSocialPoll();
+            SocialLoad.view(SocialState.view, true);
+        }
+    }
+
+    function closeSocialSettingsAndSave() {
+        const s = SocialState.settings;
+        s.autoplay = _el('social-setting-autoplay').checked;
+        s.muted = _el('social-setting-muted').checked;
+        s.hideReposts = _el('social-setting-hide-reposts').checked;
+        s.compact = _el('social-setting-compact').checked;
+        s.live = _el('social-setting-live').checked;
+        s.badges = _el('social-setting-badges').checked;
+        s.defaultFeed = _el('social-setting-default').value;
+        applySocialSettings();
+        closeModal(_el('social-settings-modal'));
+        showToast('Social settings saved', 'success');
     }
 
     function openBackupsModal() {

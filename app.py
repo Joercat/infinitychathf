@@ -2101,6 +2101,16 @@ async def _social_author_ids(db: aiosqlite.Connection, uid: int) -> List[int]:
     return list(ids)
 
 
+_SOCIAL_MEDIA_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif",
+                       ".mp4", ".webm", ".mov", ".ogg", ".m4v", ".mpeg", ".mpg")
+
+
+def _is_social_media(m: dict) -> bool:
+    mtype = (str(m.get("file_type", "") or "")).lower()
+    path = (str(m.get("file_path", "") or "")).lower()
+    return mtype.startswith("image/") or mtype.startswith("video/") or path.endswith(_SOCIAL_MEDIA_EXTS)
+
+
 @app.post("/api/social/posts")
 async def create_social_post_rest(
     body: str = Query("", max_length=MAX_POST_LENGTH),
@@ -2127,6 +2137,8 @@ async def create_social_post_rest(
             path = m.get("file_path", "")
             if not str(path).startswith(f"uploads/{user['username']}/"):
                 raise HTTPException(403, "You can only attach files you uploaded")
+            if not _is_social_media(m):
+                raise HTTPException(400, "Only images and videos can be attached to posts")
     db = await get_db()
     try:
         if reply_to_id:
@@ -2207,6 +2219,37 @@ async def delete_social_post_rest(post_id: int, token: str = Header(..., alias="
         await db.commit()
         schedule_db_sync()
         return {"status": "deleted", "post_id": post_id}
+    finally:
+        await db.close()
+
+
+@app.patch("/api/social/posts/{post_id}")
+async def edit_social_post_rest(
+    post_id: int,
+    body: str = Query("", max_length=MAX_POST_LENGTH),
+    token: str = Header(..., alias="X-Auth-Token")
+):
+    user = await authenticate_user(token)
+    if not user:
+        raise HTTPException(401)
+    body = (body or "").strip()
+    if not body:
+        raise HTTPException(400, "Post body cannot be empty")
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT author_id, is_deleted FROM social_posts WHERE id = ?", (post_id,))
+        row = await cur.fetchone()
+        if not row or row["is_deleted"]:
+            raise HTTPException(404, "Post not found")
+        if row["author_id"] != user["id"]:
+            raise HTTPException(403, "You can only edit your own posts")
+        await db.execute(
+            "UPDATE social_posts SET body = ?, edited_at_ms = ? WHERE id = ?",
+            (body, int(time.time() * 1000), post_id)
+        )
+        await db.commit()
+        schedule_db_sync()
+        return {"post": await _load_post(db, post_id, user["id"])}
     finally:
         await db.close()
 
@@ -2425,16 +2468,17 @@ async def social_search_rest(q: str = Query("", max_length=100),
         if q:
             like = f"%{q}%"
             ucur = await db.execute(
-                "SELECT id, username, display_name, avatar_path, bio FROM users "
-                "WHERE id != ? AND (lower(username) LIKE ? OR lower(display_name) LIKE ?) LIMIT 30",
-                (user["id"], like.lower(), like.lower()))
+                "SELECT u.id, u.username, u.display_name, u.avatar_path, u.bio, "
+                "(SELECT 1 FROM follows f WHERE f.follower_id = ? AND f.following_id = u.id) AS is_following "
+                "FROM users u WHERE u.id != ? AND (lower(u.username) LIKE ? OR lower(u.display_name) LIKE ?) LIMIT 30",
+                (user["id"], user["id"], like.lower(), like.lower()))
             for r in await ucur.fetchall():
                 if r["id"] in blocked:
                     continue
                 users.append({
                     "id": r["id"], "username": r["username"], "display_name": r["display_name"],
                     "avatar_path": r["avatar_path"], "bio": r["bio"],
-                    "is_following": False,
+                    "is_following": bool(r["is_following"]),
                 })
             pcur = await db.execute(
                 "SELECT * FROM social_posts WHERE is_deleted = 0 AND body LIKE ? "
