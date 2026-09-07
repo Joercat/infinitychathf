@@ -118,6 +118,11 @@ async def main():
               "second user can like", r.text[:160])
         r = await http.post(f"{BASE}/api/social/posts/{post_id}/repost", headers=h2)
         check(r.status_code == 200 and r.json()["reposted"], "second user can repost", r.text[:160])
+        r = await http.get(f"{BASE}/api/social/feed", params={"feed": "home", "limit": 50}, headers=h2)
+        repost = next((p for p in (r.json().get("posts") or [])
+                       if p["id"] == post_id and p.get("reposter_id")), None)
+        check(repost is not None and repost.get("reposter", {}).get("username") == u2,
+              "repost carries reposter info", r.text[:160])
         r = await http.post(f"{BASE}/api/social/posts/{post_id}/bookmark", headers=h2)
         check(r.status_code == 200 and r.json()["bookmarked"], "second user can bookmark", r.text[:160])
 

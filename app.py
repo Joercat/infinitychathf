@@ -2014,6 +2014,13 @@ async def _serialize_post(db: aiosqlite.Connection, row: dict, viewer_id: int,
         cur = await db.execute(f"SELECT 1 FROM {table} WHERE post_id = ? AND user_id = ?",
                                (row["id"], viewer_id))
         return await cur.fetchone() is not None
+    reposter = None
+    if reposter_id:
+        ru = await _social_user(db, reposter_id)
+        reposter = {
+            "id": ru["id"], "username": ru["username"],
+            "display_name": ru["display_name"], "avatar_path": ru["avatar_path"],
+        }
     return {
         "id": row["id"],
         "author": {
@@ -2030,6 +2037,7 @@ async def _serialize_post(db: aiosqlite.Connection, row: dict, viewer_id: int,
         "created_at_ms": row["created_at_ms"],
         "edited_at_ms": row["edited_at_ms"],
         "reposter_id": reposter_id,
+        "reposter": reposter,
         "like_count": await _count_post(db, "social_likes", row["id"]),
         "repost_count": await _count_post(db, "social_reposts", row["id"]),
         "reply_count": await _count_replies(db, row["id"]),

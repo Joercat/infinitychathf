@@ -3185,9 +3185,9 @@
         if (!post) return '';
         const author = post.author || {};
         const isOwn = State.user && author.id === State.user.id;
-        const repostLabel = post.reposter_id
-            ? `<div class="social-repost-label"><i class="fas fa-retweet"></i> ${escapeHtml(author.username || '')} reposted</div>`
-            : '';
+        const repostLabel = post.reposter
+            ? `<div class="social-repost-label"><i class="fas fa-retweet"></i> ${escapeHtml(post.reposter.username || '')} reposted</div>`
+            : (post.reposter_id ? `<div class="social-repost-label"><i class="fas fa-retweet"></i> Reposted</div>` : '');
         const quote = post.quote ? `
             <div class="social-quote">
                 <div class="social-post-head"><strong>${escapeHtml(displayNameOf(post.quote.author))}</strong>
